@@ -90,6 +90,14 @@ test('loads one canonical frontend policy separately from runtime context', () =
   assert.match(context, /<runtime_context>/)
 })
 
+test('accepts trusted supplemental context from the owning frontend layer', () => {
+  const context = buildFrontendContext({
+    supplementalContext: '<demo_dispatch>8楼负责人=黄维维</demo_dispatch>',
+  })
+
+  assert.match(context, /<demo_dispatch>8楼负责人=黄维维<\/demo_dispatch>/)
+})
+
 test('keeps mutable task state out of persistent frontend instructions', () => {
   const context = buildFrontendContext({
     activeTasks: [

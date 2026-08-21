@@ -9,9 +9,13 @@ import { AnnouncementWindow } from './announcement/announcement-window.mjs'
 import { config } from '../core/config.mjs'
 import { logger } from '../core/logger.mjs'
 import { conversationSync } from '../conversation/conversation-sync.mjs'
-import { normalizeClientContext } from '../conversation/frontend-agent-context.mjs'
+import {
+  buildKeywordKnowledgeResponseInstructions,
+  normalizeClientContext,
+} from '../conversation/frontend-agent-context.mjs'
 import {
   createRealtimeFrontend,
+  frontendTools,
   realtimeEventErrorMessage,
   resolveRealtimeProvider,
 } from './realtime-provider.mjs'
@@ -22,6 +26,7 @@ import { ToolCallHandler } from './tools/tool-call-handler.mjs'
 import { TurnTranscripts } from './tools/turn-transcripts.mjs'
 import { TurnCorrelation } from './turn-correlation.mjs'
 import { streamingInputTranscript } from './input-transcript.mjs'
+import { matchKeywordKnowledgeContext } from './keyword-knowledge-context.mjs'
 import {
   ensureResponseContext,
   mergeResponseContext,
@@ -34,6 +39,8 @@ import {
 import { ReconnectBackoff } from './reconnect-backoff.mjs'
 import { realtimeConnectionStatus } from './realtime-connection-status.mjs'
 import { SleepController } from './sleep-controller.mjs'
+import { createSpiritTaskClientFromEnvironment } from './spirit-task-direct.mjs'
+import { createSpiritVoiceNotifierFromEnvironment } from './spirit-voice-notifier.mjs'
 import { createSherpaWakeWordDetector } from './wake-word/sherpa-detector.mjs'
 import {
   evaluateResponseGuards,
@@ -117,6 +124,10 @@ export function attachRealtimeGateway(server, {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 })
   const activeVoiceClients = new ActiveVoiceClients()
   const voiceConnections = new Map()
+  const spiritTaskClient = createSpiritTaskClientFromEnvironment()
+  const spiritVoiceNotifier = createSpiritVoiceNotifierFromEnvironment({
+    spiritTaskClient,
+  })
 
   const broadcastVoiceOwnership = ownerId => {
     const active = activeVoiceClients.active(ownerId)
@@ -170,6 +181,9 @@ export function attachRealtimeGateway(server, {
     let inputEnabled = false
     let outputEnabled = false
     let textOnlySession = false
+    let activeKnowledge = null
+    const knowledgeTranscriptBuffers = new Map()
+    const knowledgeVoiceTurns = new Map()
     // Realtime front end for this session. Defaults to the configured provider
     // and can be switched by the client through the connect event.
     let sessionProvider = config.audioProvider
@@ -196,6 +210,75 @@ export function attachRealtimeGateway(server, {
     const transcripts = new TurnTranscripts()
     const announcedPermissions = new Set()
     let permissionRetryTimer = null
+    const suppressKnowledgeResponseForTurn = matchedTurnId => {
+      if (!matchedTurnId) return
+      for (const context of responseContexts.values()) {
+        if (
+          context.turnId === matchedTurnId
+          && context.origin === 'model'
+          && !context.knowledgeResponse
+        ) {
+          // ASR can reveal the keyword after the Realtime provider has
+          // already opened its automatic response. Mark that response here,
+          // not only in response.created, so late audio/transcript deltas are
+          // discarded and the knowledge answer remains the only answer.
+          context.suppressed = true
+          context.knowledgeSuperseded = true
+        }
+      }
+    }
+    const activateKnowledgeForText = (text, {
+      turnId: matchedTurnId = '',
+      source = 'voice',
+    } = {}) => {
+      if (!config.keywordKnowledgeTestEnabled) return null
+      const match = matchKeywordKnowledgeContext(text)
+      if (!match) return null
+      if (matchedTurnId && source.startsWith('voice')) {
+        const existing = knowledgeVoiceTurns.get(matchedTurnId)
+        const next = {
+          ...existing,
+          context: match.context,
+          keyword: match.keyword,
+          pendingRequested: existing?.pendingRequested === true,
+          responseRequested: existing?.responseRequested === true,
+          cancelRequested: existing?.cancelRequested === true,
+        }
+        knowledgeVoiceTurns.set(matchedTurnId, next)
+        suppressKnowledgeResponseForTurn(matchedTurnId)
+        if (!next.cancelRequested) {
+          next.cancelRequested = true
+          // Cancel immediately when the streaming ASR first exposes the
+          // keyword. Waiting for response.created leaves a race where the
+          // model can speak its memory answer before the route is known.
+          frontend?.cancel()
+        }
+      }
+      const changed = activeKnowledge?.id !== match.context.id
+      activeKnowledge = match.context
+      send(ws, {
+        type: GatewayServerEvent.KNOWLEDGE_CONTEXT,
+        state: 'matched',
+        id: activeKnowledge.id,
+        label: activeKnowledge.label,
+        version: activeKnowledge.version,
+        chars: activeKnowledge.chars,
+        sourceChars: activeKnowledge.sourceChars,
+        keyword: match.keyword,
+        source,
+        turnId: matchedTurnId,
+        changed,
+      })
+      connectionLogger.info('knowledge_context.matched', {
+        id: activeKnowledge.id,
+        keyword: match.keyword,
+        chars: activeKnowledge.chars,
+        source,
+        turnId: matchedTurnId,
+        changed,
+      })
+      return match
+    }
     const activeSessionTasks = () => taskManager.list({
       ownerId,
       sessionId,
@@ -379,6 +462,8 @@ export function attachRealtimeGateway(server, {
         })
         if (state === 'sleeping') enterSleep()
       },
+      spiritTaskClient,
+      spiritVoiceNotifier,
     })
     const currentTurn = () => ({
       turnId,
@@ -697,6 +782,22 @@ export function attachRealtimeGateway(server, {
         id,
         responseActivityContextPatch({ existing, event, fallback }),
       )
+      const matchedKnowledge = knowledgeVoiceTurns.get(context.turnId)
+      if (
+        matchedKnowledge
+        && context.origin === 'model'
+        && !context.knowledgeResponse
+      ) {
+        // A wait acknowledgement is valid only after the deterministic router
+        // has found a registered pack. Suppress the model's speculative auto
+        // answer, then emit the acknowledgement and dynamic answer in order.
+        context.suppressed = true
+        context.knowledgeSuperseded = true
+        if (!matchedKnowledge.cancelRequested) {
+          matchedKnowledge.cancelRequested = true
+          frontend?.cancel()
+        }
+      }
       // Compatible Realtime servers may omit response.created and reveal the
       // correlation only on response.done. If audio already reached the
       // client, confirm the newly identified task notification immediately.
@@ -907,6 +1008,7 @@ export function attachRealtimeGateway(server, {
       if (isSleepActivityEvent(event)) sleepController?.recordActivity()
       if (isResponseActivityEvent(event)) beginResponseLifecycle(event)
       if (event.type === 'input_audio_buffer.speech_started') {
+        knowledgeVoiceTurns.clear()
         userSpeaking = true
         clearResponseCandidate()
         const knownTurn = event.item_id
@@ -980,6 +1082,13 @@ export function attachRealtimeGateway(server, {
         const transcriptTurn = inputTurns.resolve(event.item_id, currentTurn())
         const transcript = streamingInputTranscript(event)
         if (!transcriptTurn?.turnId || !transcript) return
+        const previousKnowledgeText = knowledgeTranscriptBuffers.get(event.item_id) || ''
+        const accumulatedKnowledgeText = `${previousKnowledgeText}${transcript}`
+        knowledgeTranscriptBuffers.set(event.item_id, accumulatedKnowledgeText.slice(-500))
+        activateKnowledgeForText(accumulatedKnowledgeText, {
+          turnId: transcriptTurn.turnId,
+          source: 'voice-stream',
+        })
         send(ws, {
           type: 'transcript.delta',
           role: 'user',
@@ -992,6 +1101,7 @@ export function attachRealtimeGateway(server, {
         const transcriptTurn = completedInput.context
         if (completedInput.invalid) return
         const transcript = String(event.transcript || '').trim()
+        knowledgeTranscriptBuffers.delete(event.item_id)
         if (!transcript) {
           send(ws, {
             type: 'transcript.discard',
@@ -1001,6 +1111,10 @@ export function attachRealtimeGateway(server, {
           return
         }
         commitTurn(transcriptTurn)
+        activateKnowledgeForText(transcript, {
+          turnId: transcriptTurn.turnId,
+          source: 'voice-final',
+        })
         transcripts.record(transcriptTurn.turnId, transcript)
         if (responseTurnCandidate === transcriptTurn) {
           ensurePermissionResponseFor(transcriptTurn)
@@ -1175,6 +1289,13 @@ export function attachRealtimeGateway(server, {
           suppressed: Boolean(responseContext?.suppressed),
           transcript: responseContext?.assistantTranscript || '',
         })
+        const voiceKnowledge = knowledgeVoiceTurns.get(responseTurnId)
+        const supersededKnowledge = responseContext?.knowledgeSuperseded
+          ? voiceKnowledge
+          : null
+        const pendingKnowledge = responseContext?.knowledgePending
+          ? voiceKnowledge
+          : null
         if (!responseContext?.suppressed) {
           send(ws, { type: 'audio.done', responseId: id, turnId: responseTurnId })
           if (!responseContext?.hasAudio) {
@@ -1235,6 +1356,96 @@ export function attachRealtimeGateway(server, {
           suppressed: Boolean(responseContext?.suppressed),
           failed: responseFailed,
         })
+        if (
+          supersededKnowledge
+          && !supersededKnowledge.pendingRequested
+          && outputEnabled
+          && frontend?.ready
+          && frontend.capabilities.perResponseInstructions
+        ) {
+          supersededKnowledge.pendingRequested = true
+          const pendingFrontend = frontend
+          const pendingGeneration = responseContext?.turnGeneration
+          pendingFrontend.speak(
+            '我正在查询相关资料，请稍等。',
+            'knowledge-pending',
+            {
+              turnId: responseTurnId,
+              turnGeneration: pendingGeneration,
+              knowledgePending: true,
+            },
+            {
+              shouldSpeak: () => isResponseGuardTurnCurrent({
+                sameFrontend: frontend === pendingFrontend,
+                outputEnabled,
+                userSpeaking,
+                responseTurnId,
+                responseTurnGeneration: pendingGeneration,
+                committedTurnId,
+                committedTurnGeneration,
+              }),
+            },
+          ).catch(error => send(ws, {
+            type: 'error',
+            message: `知识库等待提示失败：${error.message}`,
+          }))
+        }
+        if (
+          pendingKnowledge
+          && !pendingKnowledge.responseRequested
+          && outputEnabled
+          && frontend?.ready
+          && frontend.capabilities.perResponseInstructions
+        ) {
+          pendingKnowledge.responseRequested = true
+          const knowledgeFrontend = frontend
+          const knowledgeGeneration = responseContext?.turnGeneration
+          knowledgeFrontend.ensureResponse({
+            turnId: responseTurnId,
+            turnGeneration: knowledgeGeneration,
+            knowledgeResponse: true,
+          }, {
+            shouldCreate: () => {
+              const current = isResponseGuardTurnCurrent({
+                sameFrontend: frontend === knowledgeFrontend,
+                outputEnabled,
+                userSpeaking,
+                responseTurnId,
+                responseTurnGeneration: knowledgeGeneration,
+                committedTurnId,
+                committedTurnGeneration,
+              })
+              if (current) {
+                send(ws, {
+                  type: GatewayServerEvent.KNOWLEDGE_CONTEXT,
+                  state: 'injected',
+                  id: pendingKnowledge.context.id,
+                  label: pendingKnowledge.context.label,
+                  version: pendingKnowledge.context.version,
+                  chars: pendingKnowledge.context.chars,
+                  sourceChars: pendingKnowledge.context.sourceChars,
+                  keyword: pendingKnowledge.keyword,
+                  source: 'voice-response',
+                  turnId: responseTurnId,
+                  changed: true,
+                })
+              }
+              return current
+            },
+            response: {
+              modalities: textOnlySession ? ['text'] : undefined,
+              instructions: buildKeywordKnowledgeResponseInstructions(
+                pendingKnowledge.context,
+              ),
+            },
+          }).catch(error => send(ws, {
+            type: 'error',
+            message: `知识库回答失败：${error.message}`,
+          }))
+        }
+        if (responseContext?.knowledgeResponse) {
+          knowledgeVoiceTurns.delete(responseTurnId)
+        }
         if (
           responseGuardDecision
           && outputEnabled
@@ -1866,6 +2077,10 @@ export function attachRealtimeGateway(server, {
         }
         sleepController.recordActivity()
         const turnId = `text_${randomUUID().replaceAll('-', '')}`
+        const knowledgeMatch = activateKnowledgeForText(
+          text,
+          { turnId, source: 'text' },
+        )
         conversationSync.record({
           ownerId,
           sessionId,
@@ -1877,15 +2092,39 @@ export function attachRealtimeGateway(server, {
         })
         send(ws, { type: 'transcript.final', role: 'user', content: text, turnId })
         ensureFrontend()
-          .then(() => frontend.sendUserText(
-            text,
-            { turnId },
-            {
-              modalities: textOnlySession && event.textOnly === true
-                ? ['text']
-                : undefined,
-            },
-          ))
+          .then(() => {
+            if (knowledgeMatch) {
+              send(ws, {
+                type: GatewayServerEvent.KNOWLEDGE_CONTEXT,
+                state: 'injected',
+                id: knowledgeMatch.context.id,
+                label: knowledgeMatch.context.label,
+                version: knowledgeMatch.context.version,
+                chars: knowledgeMatch.context.chars,
+                sourceChars: knowledgeMatch.context.sourceChars,
+                keyword: knowledgeMatch.keyword,
+                source: 'text-response',
+                turnId,
+                changed: true,
+              })
+            }
+            return frontend.sendUserText(
+              text,
+              { turnId },
+              {
+                modalities: textOnlySession && event.textOnly === true
+                  ? ['text']
+                  : undefined,
+                response: knowledgeMatch
+                  ? {
+                      instructions: buildKeywordKnowledgeResponseInstructions(
+                        knowledgeMatch.context,
+                      ),
+                    }
+                  : undefined,
+              },
+            )
+          })
           .catch(reportFrontendError)
       } else if (event.type === GatewayClientEvent.INTERRUPT) {
         sleepController.recordActivity()
@@ -2028,6 +2267,15 @@ export function attachRealtimeGateway(server, {
         activeOwners: activeVoiceClients.size,
         byType,
         realtime,
+        spirit: {
+          mode: 'direct-api',
+          baseUrl: spiritTaskClient.baseUrl,
+          taskApiConfigured: spiritTaskClient.configured,
+          voiceNotifierConfigured: spiritVoiceNotifier.configured,
+          tools: frontendTools()
+            .map(tool => tool?.function?.name)
+            .filter(name => String(name || '').startsWith('spirit_')),
+        },
       }
     },
   }

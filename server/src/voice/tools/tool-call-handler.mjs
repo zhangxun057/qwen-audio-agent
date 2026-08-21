@@ -8,9 +8,23 @@ import {
   NOTES_TOOL_NAME,
   MEMORY_TOOL_NAME,
   RESPOND_AGENT_PERMISSION_TOOL_NAME,
+  SPIRIT_TASK_LIST_TOOL_NAME,
+  SPIRIT_TASK_DETAIL_TOOL_NAME,
+  SPIRIT_TASK_COMMENTS_TOOL_NAME,
+  SPIRIT_TASK_CREATE_TOOL_NAME,
+  SPIRIT_TASK_UPDATE_TOOL_NAME,
+  SPIRIT_TASK_DELETE_TOOL_NAME,
+  SPIRIT_VOICE_NOTIFY_TOOL_NAME,
 } from '../realtime-provider.mjs'
 import { currentTimeSnapshot } from '../../conversation/frontend-agent-context.mjs'
 import { canonicalScope, isMemoryDocument } from '../../core/memory-scopes.mjs'
+import {
+  buildSpiritTaskUsers,
+  normalizeSpiritTaskSummary,
+  resolveSpiritAssignee,
+  SPIRIT_DEMO_CHANNEL,
+  SPIRIT_DEMO_CREATOR,
+} from '../spirit-task-directory.mjs'
 
 const SENSITIVE_MEMORY = /(?:pass(?:word)?|secret|api[_ -]?key|access[_ -]?token|credential|验证码|密码|密钥|令牌|\bsk-[a-z0-9_-]+)/i
 
@@ -49,6 +63,8 @@ export class ToolCallHandler {
     permissionPolicy,
     onPermissionDeliveryFailed = () => {},
     requestClientState = () => {},
+    spiritTaskClient = null,
+    spiritVoiceNotifier = null,
   }) {
     this.taskManager = taskManager
     this.ownerId = ownerId
@@ -68,6 +84,8 @@ export class ToolCallHandler {
     this.permissionPolicy = permissionPolicy
     this.onPermissionDeliveryFailed = onPermissionDeliveryFailed
     this.requestClientState = requestClientState
+    this.spiritTaskClient = spiritTaskClient
+    this.spiritVoiceNotifier = spiritVoiceNotifier
     this.gatewayApprovedPermissions = new Set()
     this.processedCalls = new Set()
     this.turnTasks = new Map()
@@ -390,6 +408,30 @@ export class ToolCallHandler {
       await this.enterSleep(callId, turnId)
       return
     }
+    if ([
+      SPIRIT_TASK_LIST_TOOL_NAME,
+      SPIRIT_TASK_DETAIL_TOOL_NAME,
+      SPIRIT_TASK_COMMENTS_TOOL_NAME,
+    ].includes(toolName)) {
+      await this.handleSpiritTask(callId, turnId, toolName, args)
+      return
+    }
+    if (toolName === SPIRIT_TASK_CREATE_TOOL_NAME) {
+      await this.createSpiritTask(callId, turnId, args)
+      return
+    }
+    if (toolName === SPIRIT_TASK_UPDATE_TOOL_NAME) {
+      await this.updateSpiritTask(callId, turnId, args)
+      return
+    }
+    if (toolName === SPIRIT_TASK_DELETE_TOOL_NAME) {
+      await this.deleteSpiritTask(callId, turnId, args)
+      return
+    }
+    if (toolName === SPIRIT_VOICE_NOTIFY_TOOL_NAME) {
+      await this.notifySpiritUser(callId, turnId, args)
+      return
+    }
     if (toolName !== DELEGATE_TOOL_NAME) {
       await this.sendOutput(
         callId,
@@ -596,6 +638,309 @@ export class ToolCallHandler {
         },
       },
     )
+  }
+
+  async handleSpiritTask(callId, turnId, toolName, args) {
+    if (!this.spiritTaskClient) {
+      await this.sendOutput(callId, {
+        status: 'error', error: true, error_code: 'task_tool_unavailable',
+        user_message: '当前没有连接到 Spirit 任务 API。', retryable: true,
+      }, turnId)
+      return
+    }
+    const taskId = String(args.taskId || '').trim()
+    if (toolName !== SPIRIT_TASK_LIST_TOOL_NAME && !taskId) {
+      await this.sendOutput(callId, {
+        status: 'error', error: true, error_code: 'missing_task_id',
+        user_message: '查询任务详情需要明确的任务 ID。', retryable: true,
+      }, turnId)
+      return
+    }
+    try {
+      const result = toolName === SPIRIT_TASK_LIST_TOOL_NAME
+        ? await this.spiritTaskClient.list(args)
+        : toolName === SPIRIT_TASK_DETAIL_TOOL_NAME
+          ? await this.spiritTaskClient.detail(taskId)
+          : await this.spiritTaskClient.comments(taskId)
+      await this.sendOutput(callId, {
+        status: 'ok', source: 'spirit-api-direct', result,
+      }, turnId, null, {
+        response: {
+          instructions: [
+            '第一句话直接说任务信息，不要任何开场、概述或查询确认。',
+            '禁止说“我查到了”“目前系统中”“给您说几个”“任务列表如下”。',
+            '列表逐条只说标题、状态、执行人等用户需要的字段；能一句说清就只说一句。',
+            '状态使用自然中文：IN_PROGRESS说“进行中”，DONE说“已完成”，PENDING说“待处理”，CANCELLED说“已取消”；不要朗读英文枚举值。',
+            '不要提后台 Agent、函数名、接口名、缓存或内部字段。',
+            '结果为空时只说“没有查到任务”。',
+          ].join(' '),
+        },
+      })
+    } catch (error) {
+      await this.sendOutput(callId, {
+        status: 'error', error: true, error_code: 'task_query_failed',
+        user_message: String(error?.message || error), retryable: true,
+      }, turnId, null, {
+        response: {
+          instructions: '简短说明任务服务当前不可用或登录态失效，不要声称已经查到结果。',
+        },
+      })
+    }
+  }
+
+  async createSpiritTask(callId, turnId, args) {
+    if (!this.spiritTaskClient) {
+      await this.sendOutput(callId, failure(
+        'task_tool_unavailable',
+        '当前没有连接到 Spirit 任务 API。',
+        { retryable: true },
+      ), turnId)
+      return
+    }
+    try {
+      const request = String(args.request || '').trim()
+      if (!request) throw new Error('创建任务需要保留用户原话')
+      const selfTest = args.selfTest === true
+      if (
+        selfTest
+        && !(
+          /(?:自测|测试)/u.test(request)
+          && /(?:不|别|无需|不要)(?:发送|发)?(?:任何人)?(?:语音)?通知/u.test(request)
+        )
+      ) {
+        throw new Error('selfTest 只允许用于用户明确提出且要求不通知任何人的自测任务')
+      }
+      const assignee = selfTest
+        ? {
+            name: SPIRIT_DEMO_CREATOR.userName,
+            userId: SPIRIT_DEMO_CREATOR.userId,
+            department: '系统自测',
+            floors: [],
+            matchedBy: 'self-test',
+            matchedFloor: null,
+          }
+        : resolveSpiritAssignee({
+            assigneeName: args.assigneeName,
+            roomNumber: args.roomNumber,
+            floor: args.floor,
+            request,
+          })
+      const summary = normalizeSpiritTaskSummary(args.summary || request)
+      const description = String(args.description || request).trim()
+      const payload = {
+        summary,
+        description,
+        taskOpeningPrompt: request,
+        originalRequest: {
+          sourceConversationId: '',
+          sourceChatId: '',
+          requestPayload: {
+            text: request,
+            files: [],
+          },
+        },
+        status: 'IN_PROGRESS',
+        ...SPIRIT_DEMO_CHANNEL,
+        users: buildSpiritTaskUsers(assignee),
+        recommendedActions: [],
+      }
+      const created = await this.spiritTaskClient.create(payload)
+      const taskId = String(created?.taskId || created?.id || '').trim()
+      if (!taskId) throw new Error('任务接口返回成功，但没有 taskId')
+
+      let notification = { status: 'disabled' }
+      if (!selfTest && args.notify !== false) {
+        if (!this.spiritVoiceNotifier?.configured) {
+          notification = { status: 'not_configured' }
+        } else {
+          try {
+            notification = await this.spiritVoiceNotifier.notify({
+              recipientId: assignee.userId,
+              recipientName: assignee.name,
+              title: '任务提醒',
+              text: `您有一个新任务【${summary}】，请立即执行。`,
+            })
+          } catch (error) {
+            notification = {
+              status: 'failed',
+              error: String(error?.message || error),
+            }
+          }
+        }
+      }
+
+      await this.sendOutput(callId, {
+        status: 'ok',
+        source: 'spirit-api-direct',
+        action: 'created',
+        taskId,
+        summary,
+        assignee: {
+          name: assignee.name,
+          userId: assignee.userId,
+          matchedBy: assignee.matchedBy,
+          floor: assignee.matchedFloor,
+        },
+        notification,
+        result: created,
+      }, turnId, null, {
+        response: {
+          instructions: [
+            '直接说“任务已派给某人”，必要时补充通知结果；不要开场或解释过程。',
+            '只有 notification.status=sent 才能说语音通知已发送。',
+            'skipped_by_gate 表示任务已创建，但接收人关闭通知；当前不检查是否在岗。failed 或 not_configured 也必须明确区分。',
+            '不要朗读 taskId、userId、函数名、接口名或内部字段。',
+          ].join(' '),
+        },
+      })
+    } catch (error) {
+      await this.sendOutput(callId, failure(
+        'task_create_failed',
+        String(error?.message || error),
+        { retryable: true },
+      ), turnId, null, {
+        response: {
+          instructions: '简短说明任务没有创建成功以及真实原因；不得声称已派发或已通知。',
+        },
+      })
+    }
+  }
+
+  async updateSpiritTask(callId, turnId, args) {
+    if (!this.spiritTaskClient) {
+      await this.sendOutput(callId, failure(
+        'task_tool_unavailable',
+        '当前没有连接到 Spirit 任务 API。',
+        { retryable: true },
+      ), turnId)
+      return
+    }
+    try {
+      const taskId = String(args.taskId || '').trim()
+      if (!taskId) throw new Error('修改任务需要真实 taskId')
+      const payload = { taskId }
+      if (args.status) payload.status = String(args.status)
+      if (args.description !== undefined) {
+        payload.description = String(args.description || '').trim()
+      }
+      let assignee = null
+      if (args.assigneeName || args.roomNumber || args.floor) {
+        assignee = resolveSpiritAssignee({
+          assigneeName: args.assigneeName,
+          roomNumber: args.roomNumber,
+          floor: args.floor,
+        })
+        payload.executors = [buildSpiritTaskUsers(assignee)[1]]
+      }
+      if (Object.keys(payload).length === 1) {
+        throw new Error('请至少提供状态、描述或新的执行人')
+      }
+      const result = await this.spiritTaskClient.update(payload)
+      await this.sendOutput(callId, {
+        status: 'ok',
+        source: 'spirit-api-direct',
+        action: 'updated',
+        taskId,
+        changes: {
+          status: payload.status,
+          description: payload.description,
+          assignee: assignee?.name,
+        },
+        result,
+      }, turnId, null, {
+        response: {
+          instructions: '自然说明实际修改了什么；不要朗读 taskId、userId、接口名或空字段。',
+        },
+      })
+    } catch (error) {
+      await this.sendOutput(callId, failure(
+        'task_update_failed',
+        String(error?.message || error),
+        { retryable: true },
+      ), turnId)
+    }
+  }
+
+  async deleteSpiritTask(callId, turnId, args) {
+    if (!this.spiritTaskClient) {
+      await this.sendOutput(callId, failure(
+        'task_tool_unavailable',
+        '当前没有连接到 Spirit 任务 API。',
+        { retryable: true },
+      ), turnId)
+      return
+    }
+    try {
+      const taskId = String(args.taskId || '').trim()
+      const transcript = String(
+        await this.transcripts?.transcript(turnId) || '',
+      ).trim()
+      if (!taskId) throw new Error('删除任务需要真实 taskId')
+      if (args.confirmed !== true || !/(?:删除|删掉|移除|作废)/u.test(transcript)) {
+        throw new Error('用户本轮没有明确确认删除，已拒绝执行')
+      }
+      const result = await this.spiritTaskClient.delete(taskId)
+      await this.sendOutput(callId, {
+        status: 'ok',
+        source: 'spirit-api-direct',
+        action: 'deleted',
+        taskId,
+        result,
+      }, turnId, null, {
+        response: {
+          instructions: '只说明指定任务已删除，不要朗读 taskId、接口名或内部字段。',
+        },
+      })
+    } catch (error) {
+      await this.sendOutput(callId, failure(
+        'task_delete_failed',
+        String(error?.message || error),
+        { retryable: false },
+      ), turnId)
+    }
+  }
+
+  async notifySpiritUser(callId, turnId, args) {
+    try {
+      if (!this.spiritVoiceNotifier?.configured) {
+        throw new Error('语音通知接口尚未完整配置')
+      }
+      const text = String(args.text || '').trim()
+      if (!text) throw new Error('语音通知内容不能为空')
+      const assignee = resolveSpiritAssignee({
+        assigneeName: args.assigneeName,
+        roomNumber: args.roomNumber,
+        floor: args.floor,
+        request: text,
+      })
+      const notification = await this.spiritVoiceNotifier.notify({
+        recipientId: assignee.userId,
+        recipientName: assignee.name,
+        title: String(args.title || '任务提醒').trim(),
+        text,
+      })
+      await this.sendOutput(callId, {
+        status: 'ok',
+        source: 'spirit-api-direct',
+        action: 'voice_notified',
+        assignee: { name: assignee.name, userId: assignee.userId },
+        notification,
+      }, turnId, null, {
+        response: {
+          instructions: [
+            '只有 notification.status=sent 才能说语音通知已发送。',
+            '如果是 skipped_by_gate，只说明接收人关闭了通知；当前不检查是否在岗。不要声称成功。',
+            '不要朗读 userId、音频 URL、消息 ID 或内部字段。',
+          ].join(' '),
+        },
+      })
+    } catch (error) {
+      await this.sendOutput(callId, failure(
+        'voice_notification_failed',
+        String(error?.message || error),
+        { retryable: true },
+      ), turnId)
+    }
   }
 
   async enterSleep(callId, turnId) {

@@ -313,7 +313,16 @@ test('configures Qwen Audio Realtime with Smart Turn only', () => {
   assert.equal(REALTIME_PROVIDERS.qwen.inputSampleRate, 16000)
   assert.deepEqual(
     session.tools.map(tool => tool.function.name),
-    FRONTEND_TOOL_NAMES,
+    [
+      ...FRONTEND_TOOL_NAMES,
+      'spirit_task_list',
+      'spirit_task_detail',
+      'spirit_task_comments',
+      'spirit_task_create',
+      'spirit_task_update',
+      'spirit_task_delete',
+      'spirit_voice_notify',
+    ],
   )
   assert.deepEqual(
     session.tools[0].function.parameters.required,
@@ -1101,6 +1110,48 @@ test('submits text through the documented Qwen conversation protocol', async () 
   assert.deepEqual(await outcome, {
     completed: true,
     responseId: 'response-text',
+  })
+})
+
+test('can submit text with dynamic one-response knowledge instructions', async () => {
+  const frontend = createQwenFrontend({
+    responseStartTimeoutMs: 50,
+    responseCompletionTimeoutMs: 50,
+  })
+  const sent = []
+  frontend.ready = true
+  frontend.send = payload => sent.push(payload)
+
+  const outcome = frontend.sendUserText(
+    '游戏资料，精益求精怎么选词条？',
+    { turnId: 'text-rag' },
+    { response: { instructions: '动态知识包' }, modalities: ['text'] },
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  frontend.handleLifecycle({
+    type: 'conversation.item.created',
+    item: { ...sent[0].item, status: 'completed' },
+  })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.deepEqual(sent[1], {
+    type: 'response.create',
+    response: {
+      instructions: '动态知识包',
+      modalities: ['text'],
+    },
+  })
+  frontend.handleLifecycle({
+    type: 'response.created',
+    response: { id: 'response-text-rag' },
+  })
+  frontend.handleLifecycle({
+    type: 'response.done',
+    response: { id: 'response-text-rag', status: 'completed' },
+  })
+  assert.deepEqual(await outcome, {
+    completed: true,
+    responseId: 'response-text-rag',
   })
 })
 

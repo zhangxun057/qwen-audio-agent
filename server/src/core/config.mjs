@@ -321,6 +321,19 @@ export const config = {
     6000,
     { min: 256 },
   ),
+  keywordKnowledgeTestEnabled: String(
+    process.env.QWEN_AUDIO_AGENT_KEYWORD_KNOWLEDGE_TEST || 'true',
+  ).toLowerCase() === 'true',
+  keywordKnowledgeTargetChars: numberSetting(
+    process.env.QWEN_AUDIO_AGENT_KEYWORD_KNOWLEDGE_TARGET_CHARS,
+    52_000,
+    { min: 1_000, max: 56_000 },
+  ),
+  keywordKnowledgeMaxChars: numberSetting(
+    process.env.QWEN_AUDIO_AGENT_KEYWORD_KNOWLEDGE_MAX_CHARS,
+    52_000,
+    { min: 1_000, max: 56_000 },
+  ),
   announcementBatchMs: numberSetting(
     process.env.QWEN_AUDIO_AGENT_ANNOUNCEMENT_BATCH_MS,
     120,

@@ -167,6 +167,7 @@ export default function useRealtimeVoice({
   outputMuted = false,
   inputOnlyMute = false,
   wakeWordOnly = false,
+  textOnly = false,
   clientType = 'web',
   clientLabel = 'WebUI',
   clientStates = [],
@@ -461,6 +462,7 @@ export default function useRealtimeVoice({
           voiceEnabled: outputEnabled,
           inputEnabled,
           outputEnabled,
+          textOnly,
           wakeWordOnly: wakeWordOnlyRef.current,
           clientType,
           clientLabel,
@@ -593,6 +595,7 @@ export default function useRealtimeVoice({
     stopPlayback,
     suspended,
     takeover,
+    textOnly,
   ])
 
   useEffect(() => {
@@ -758,6 +761,17 @@ export default function useRealtimeVoice({
     sendSocketEvent({ type: GatewayClientEvent.WAKE })
   ), [sendSocketEvent])
 
+  const sendText = useCallback((text, { textOnly = false } = {}) => {
+    const content = String(text || '').trim()
+    if (!content) return false
+    sendSocketEvent({
+      type: GatewayClientEvent.TEXT_MESSAGE,
+      text: content,
+      textOnly,
+    })
+    return true
+  }, [sendSocketEvent])
+
   return {
     state,
     visualState: visualVoiceState(state, inputActive, enabled && !suspended),
@@ -770,6 +784,7 @@ export default function useRealtimeVoice({
     levelElementRef,
     activateAudio,
     interrupt,
+    sendText,
     wake,
   }
 }

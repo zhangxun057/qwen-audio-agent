@@ -4,6 +4,7 @@ import {
   loadAssistantProfile,
 } from '../conversation/frontend-agent-context.mjs'
 import { MEMORY_DOCUMENTS } from '../core/memory-scopes.mjs'
+import { buildSpiritTaskDispatchContext } from './spirit-task-directory.mjs'
 
 export const SPAWN_THINKING_TOOL_NAME = 'spawn_thinking'
 export const SCHEDULE_REMINDER_TOOL_NAME = 'schedule_reminder'
@@ -15,6 +16,13 @@ export const MEMORY_TOOL_NAME = 'memory'
 export const NOTES_TOOL_NAME = 'notes'
 export const RESPOND_AGENT_PERMISSION_TOOL_NAME = 'respond_agent_permission'
 export const ENTER_SLEEP_TOOL_NAME = 'enter_sleep'
+export const SPIRIT_TASK_LIST_TOOL_NAME = 'spirit_task_list'
+export const SPIRIT_TASK_DETAIL_TOOL_NAME = 'spirit_task_detail'
+export const SPIRIT_TASK_COMMENTS_TOOL_NAME = 'spirit_task_comments'
+export const SPIRIT_TASK_CREATE_TOOL_NAME = 'spirit_task_create'
+export const SPIRIT_TASK_UPDATE_TOOL_NAME = 'spirit_task_update'
+export const SPIRIT_TASK_DELETE_TOOL_NAME = 'spirit_task_delete'
+export const SPIRIT_VOICE_NOTIFY_TOOL_NAME = 'spirit_voice_notify'
 
 const delegateTool = {
   type: 'function',
@@ -187,6 +195,137 @@ const enterSleepTool = {
   },
 }
 
+const spiritTaskListTool = {
+  type: 'function',
+  function: {
+    name: SPIRIT_TASK_LIST_TOOL_NAME,
+    description: '直接查询 Spirit 业务任务 API。用户问任务、待办、业务任务列表时必须调用此工具，不要调用 spawn_thinking，不要猜测或使用旧缓存。当前只读。',
+    parameters: {
+      type: 'object',
+      properties: {
+        pageNo: { type: 'integer', description: '页码，默认 1。' },
+        requestNum: { type: 'integer', description: '返回数量，最多 20。' },
+        keyword: { type: 'string', description: '标题关键词。' },
+        source: { type: 'string', description: '任务来源。' },
+        taskView: { type: 'string', enum: ['EXECUTE', 'FOCUS', 'CURRENT', 'HISTORY', 'ALL'], description: '任务视图，默认 ALL。' },
+        userId: { type: 'string', description: '参与人用户 ID。' },
+        executeTimeFrom: { type: 'string', description: '开始时间。' },
+        executeTimeTo: { type: 'string', description: '结束时间。' },
+      },
+      additionalProperties: false,
+    },
+  },
+}
+
+const spiritTaskDetailTool = {
+  type: 'function',
+  function: {
+    name: SPIRIT_TASK_DETAIL_TOOL_NAME,
+    description: '直接查询 Spirit 业务任务 API 的任务详情。必须先从 spirit_task_list 或用户明确提供的结果中取得 taskId，当前只读。',
+    parameters: {
+      type: 'object',
+      properties: { taskId: { type: 'string', description: 'Spirit 任务 ID。' } },
+      required: ['taskId'],
+      additionalProperties: false,
+    },
+  },
+}
+
+const spiritTaskCommentsTool = {
+  type: 'function',
+  function: {
+    name: SPIRIT_TASK_COMMENTS_TOOL_NAME,
+    description: '直接查询 Spirit 业务任务 API 的任务执行记录和评论。当前只读。',
+    parameters: {
+      type: 'object',
+      properties: { taskId: { type: 'string', description: 'Spirit 任务 ID。' } },
+      required: ['taskId'],
+      additionalProperties: false,
+    },
+  },
+}
+
+const spiritTaskCreateTool = {
+  type: 'function',
+  function: {
+    name: SPIRIT_TASK_CREATE_TOOL_NAME,
+    description: '直接创建并派发 Spirit 业务任务。根据姓名或房号选择执行人：16至24楼及22、25、26、28楼按员工卡片映射，没有专属负责人的楼层由黄维维兜底；notify 默认为 true，创建成功后尝试发送语音通知。只有用户明确说“自测且不通知任何人”时才可设置 selfTest=true，此时强制使用系统测试账号并关闭通知。不得调用后台 Agent 或自行拼 API。',
+    parameters: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: '用户本轮关于任务派发的原话，必须忠实保留。' },
+        summary: { type: 'string', description: '简短规整后的任务标题，例如“8201房送2瓶水”；不确定时可省略，由系统从 request 做基础规整。' },
+        description: { type: 'string', description: '必要的补充说明；没有可省略。' },
+        assigneeName: { type: 'string', description: '用户明确点名的执行人；必须来自当前员工映射表。' },
+        roomNumber: { type: 'string', description: '房号，例如 801、8201、901、1001。' },
+        floor: { type: 'integer', description: '明确楼层；系统按当前员工卡片映射选择执行人。' },
+        notify: { type: 'boolean', description: '是否在任务创建后发送语音通知，默认 true。' },
+        selfTest: { type: 'boolean', description: '仅当用户明确要求自测且不通知任何人时设为 true；系统将使用当前测试账号并强制关闭通知。' },
+      },
+      required: ['request'],
+      additionalProperties: false,
+    },
+  },
+}
+
+const spiritTaskUpdateTool = {
+  type: 'function',
+  function: {
+    name: SPIRIT_TASK_UPDATE_TOOL_NAME,
+    description: '直接修改一个已知 taskId 的 Spirit 任务，可修改状态、描述或重新分配给当前 Demo 人员。必须使用查询或创建结果中的真实 taskId。',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: '真实 Spirit 任务 ID。' },
+        status: { type: 'string', enum: ['PENDING_RECEIPT', 'TODO', 'IN_PROGRESS', 'PENDING_APPROVAL', 'DONE', 'EXCEPTION'], description: '新任务状态。' },
+        description: { type: 'string', description: '替换后的任务描述。' },
+        assigneeName: { type: 'string', description: '重新分配的执行人姓名。' },
+        roomNumber: { type: 'string', description: '用于按楼层重新匹配执行人的房号。' },
+        floor: { type: 'integer', description: '用于重新匹配执行人的楼层。' },
+      },
+      required: ['taskId'],
+      additionalProperties: false,
+    },
+  },
+}
+
+const spiritTaskDeleteTool = {
+  type: 'function',
+  function: {
+    name: SPIRIT_TASK_DELETE_TOOL_NAME,
+    description: '删除一个 Spirit 任务。只有用户本轮明确要求删除并且已取得真实 taskId 时才能调用；confirmed 必须为 true。不得根据模糊指代猜测 taskId。',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: '要删除的真实 Spirit 任务 ID。' },
+        confirmed: { type: 'boolean', description: '用户本轮是否明确确认删除，必须为 true。' },
+      },
+      required: ['taskId', 'confirmed'],
+      additionalProperties: false,
+    },
+  },
+}
+
+const spiritVoiceNotifyTool = {
+  type: 'function',
+  function: {
+    name: SPIRIT_VOICE_NOTIFY_TOOL_NAME,
+    description: '不创建任务，单独向当前 Demo 人员发送一条语音通知。根据姓名或房号选择接收人，并严格以工具真实返回判断是否发送成功。',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '需要合成和发送的完整语音通知文本。' },
+        title: { type: 'string', description: '通知标题，默认“任务提醒”。' },
+        assigneeName: { type: 'string', description: '接收人姓名。' },
+        roomNumber: { type: 'string', description: '用于按楼层匹配接收人的房号。' },
+        floor: { type: 'integer', description: '用于匹配接收人的楼层。' },
+      },
+      required: ['text'],
+      additionalProperties: false,
+    },
+  },
+}
+
 const scheduleReminderTool = {
   type: 'function',
   function: {
@@ -229,6 +368,13 @@ export const TOOLS = [
   memoryTool,
   notesTool,
   respondAgentPermissionTool,
+  spiritTaskListTool,
+  spiritTaskDetailTool,
+  spiritTaskCommentsTool,
+  spiritTaskCreateTool,
+  spiritTaskUpdateTool,
+  spiritTaskDeleteTool,
+  spiritVoiceNotifyTool,
 ]
 
 export function frontendTools(agentContext = {}) {
@@ -268,6 +414,9 @@ export function buildFrontendInstructions(agentContext = {}) {
     '<assistant_profile authority="persona_only">',
     loadAssistantProfile(),
     '</assistant_profile>',
-    buildFrontendContext(agentContext),
+    buildFrontendContext({
+      ...agentContext,
+      supplementalContext: buildSpiritTaskDispatchContext(),
+    }),
   ].join('\n\n')
 }
