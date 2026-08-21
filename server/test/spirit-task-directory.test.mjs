@@ -59,10 +59,14 @@ test('maps configured room prefixes to demo floor owners', () => {
 })
 
 test('builds creator and executor records required by Spirit', () => {
-  const users = buildSpiritTaskUsers(resolveSpiritAssignee({ roomNumber: '801' }))
+  const users = buildSpiritTaskUsers(resolveSpiritAssignee({ roomNumber: '801' }), {
+    creator: { userId: 'demo-user-hotel-10082', userName: '张洵' },
+  })
 
   assert.equal(users.length, 2)
   assert.equal(users[0].userRole, 'CREATOR')
+  assert.equal(users[0].userId, 'demo-user-hotel-10082')
+  assert.equal(users[0].userName, '张洵')
   assert.equal(users[1].userRole, 'EXECUTOR')
   assert.equal(users[1].userId, '2078987_hotel_10082')
   assert.equal(users[1].channelCode, '10082')

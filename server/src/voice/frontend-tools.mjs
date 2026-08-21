@@ -206,7 +206,7 @@ const spiritTaskListTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_LIST_TOOL_NAME,
-    description: '直接查询 Spirit 业务任务 API。用户问任务、待办、业务任务列表时必须调用此工具，不要调用 spawn_thinking，不要猜测或使用旧缓存。当前只读。',
+    description: '直接查询 Spirit 业务任务 API。用户问任务、待办、业务任务列表时必须调用此工具，不要调用 spawn_thinking，不要猜测或使用旧缓存。不要向用户索要 userId；当前身份由系统自动提供。查询“我的任务”时传 scope=MY，其他任务查询传 scope=ALL。当前只读。',
     parameters: {
       type: 'object',
       properties: {
@@ -215,7 +215,7 @@ const spiritTaskListTool = {
         keyword: { type: 'string', description: '标题关键词。' },
         source: { type: 'string', description: '任务来源。' },
         taskView: { type: 'string', enum: ['EXECUTE', 'FOCUS', 'CURRENT', 'HISTORY', 'ALL'], description: '任务视图，默认 ALL。' },
-        userId: { type: 'string', description: '参与人用户 ID。' },
+        scope: { type: 'string', enum: ['MY', 'ALL'], description: 'MY=当前登录用户参与的任务；ALL=当前账号可查询的任务。不要填写 userId。' },
         executeTimeFrom: { type: 'string', description: '开始时间。' },
         executeTimeTo: { type: 'string', description: '结束时间。' },
       },
@@ -228,11 +228,14 @@ const spiritTaskDetailTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_DETAIL_TOOL_NAME,
-    description: '直接查询 Spirit 业务任务 API 的任务详情。必须先从 spirit_task_list 或用户明确提供的结果中取得 taskId，当前只读。',
+    description: '直接查询 Spirit 业务任务 API 的任务详情。用户用房号、标题、执行人或“刚才那个任务”指代时，先由系统自动定位真实任务；用户不需要提供 taskId。只有结果为空或多个候选时才请用户确认。当前只读。',
     parameters: {
       type: 'object',
-      properties: { taskId: { type: 'string', description: 'Spirit 任务 ID。' } },
-      required: ['taskId'],
+      properties: {
+        taskId: { type: 'string', description: '可选：已由工具结果返回的真实 Spirit 任务 ID。不要向用户索要。' },
+        reference: { type: 'string', description: '可选：用户对任务的自然指代，例如“604房那个任务”“刚才创建的任务”。' },
+      },
+      required: [],
       additionalProperties: false,
     },
   },
@@ -242,11 +245,14 @@ const spiritTaskCommentsTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_COMMENTS_TOOL_NAME,
-    description: '直接查询 Spirit 业务任务 API 的任务执行记录和评论。当前只读。',
+    description: '直接查询 Spirit 业务 API 的任务执行记录和评论。用户不需要提供 taskId；按房号、标题或上下文指代任务时由系统自动定位，多个候选才确认。当前只读。',
     parameters: {
       type: 'object',
-      properties: { taskId: { type: 'string', description: 'Spirit 任务 ID。' } },
-      required: ['taskId'],
+      properties: {
+        taskId: { type: 'string', description: '可选：已由工具结果返回的真实 Spirit 任务 ID。不要向用户索要。' },
+        reference: { type: 'string', description: '可选：用户对任务的自然指代。' },
+      },
+      required: [],
       additionalProperties: false,
     },
   },
@@ -256,17 +262,18 @@ const spiritTaskCreateTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_CREATE_TOOL_NAME,
-    description: '直接创建并派发 Spirit 业务任务。根据姓名或房号选择执行人：16至24楼及22、25、26、28楼按员工卡片映射，没有专属负责人的楼层由黄维维兜底；notify 默认为 true，创建成功后尝试发送语音通知。只有用户明确说“自测且不通知任何人”时才可设置 selfTest=true，此时强制使用系统测试账号并关闭通知。不得调用后台 Agent 或自行拼 API。',
+    description: '直接创建并派发 Spirit 业务任务。根据姓名或房号选择执行人：16至24楼及22、25、26、28楼按员工卡片映射，没有专属负责人的楼层由黄维维兜底；说“我自己”时使用当前身份。普通任务创建成功后系统立即向执行人发送工作通知，不等待系统状态通知；不要在创建后再次调用 spirit_voice_notify。只有用户明确要求“自测且不通知任何人”时才可设置 selfTest=true，此时关闭通知。不得调用后台 Agent 或自行拼 API。',
     parameters: {
       type: 'object',
       properties: {
         request: { type: 'string', description: '用户本轮关于任务派发的原话，必须忠实保留。' },
         summary: { type: 'string', description: '简短规整后的任务标题，例如“8201房送2瓶水”；不确定时可省略，由系统从 request 做基础规整。' },
         description: { type: 'string', description: '必要的补充说明；没有可省略。' },
-        assigneeName: { type: 'string', description: '用户明确点名的执行人；必须来自当前员工映射表。' },
+        assigneeName: { type: 'string', description: '用户明确点名的执行人；说“我自己/我本人”时由 Gateway 使用当前登录身份，不读取或填写用户 ID。' },
         roomNumber: { type: 'string', description: '房号，例如 801、8201、901、1001。' },
         floor: { type: 'integer', description: '明确楼层；系统按当前员工卡片映射选择执行人。' },
-        notify: { type: 'boolean', description: '是否在任务创建后发送语音通知，默认 true。' },
+        executeTime: { type: 'string', description: '可选，要求开始执行时间，格式 yyyy-MM-dd HH:mm:ss；用户说“几点开始”时填写。' },
+        completeTime: { type: 'string', description: '可选，要求完成时间，格式 yyyy-MM-dd HH:mm:ss；用户说“几点前完成”时填写，不得写入 description。' },
         selfTest: { type: 'boolean', description: '仅当用户明确要求自测且不通知任何人时设为 true；系统将使用当前测试账号并强制关闭通知。' },
       },
       required: ['request'],
@@ -279,18 +286,21 @@ const spiritTaskUpdateTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_UPDATE_TOOL_NAME,
-    description: '直接修改一个已知 taskId 的 Spirit 任务，可修改状态、描述或重新分配给当前 Demo 人员。必须使用查询或创建结果中的真实 taskId。',
+    description: '直接修改 Spirit 任务的状态、描述、执行人或要求时间。用户不需要提供 taskId；按房号、标题或“刚才那个任务”指代时先自动定位，多个候选才确认。要求完成时间写入 completeTime，不得写入 description；系统会按修改内容选择正确的业务接口。重新分配成功后系统会立即向新执行人发送工作通知，不等待旧系统通知；不要再调用 spirit_voice_notify。',
     parameters: {
       type: 'object',
       properties: {
-        taskId: { type: 'string', description: '真实 Spirit 任务 ID。' },
+        taskId: { type: 'string', description: '可选：已由工具结果返回的真实 Spirit 任务 ID。不要向用户索要。' },
+        reference: { type: 'string', description: '可选：用户对任务的自然指代。' },
         status: { type: 'string', enum: [...SPIRIT_TASK_STATUSES], description: '新任务状态。' },
         description: { type: 'string', description: '替换后的任务描述。' },
         assigneeName: { type: 'string', description: '重新分配的执行人姓名。' },
         roomNumber: { type: 'string', description: '用于按楼层重新匹配执行人的房号。' },
         floor: { type: 'integer', description: '用于重新匹配执行人的楼层。' },
+        executeTime: { type: 'string', description: '可选，新的要求开始执行时间，格式 yyyy-MM-dd HH:mm:ss。' },
+        completeTime: { type: 'string', description: '可选，新的要求完成时间，格式 yyyy-MM-dd HH:mm:ss；不得写入 description。' },
       },
-      required: ['taskId'],
+      required: [],
       additionalProperties: false,
     },
   },
@@ -300,13 +310,14 @@ const spiritTaskStartTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_START_TOOL_NAME,
-    description: '启动一个已知的 Spirit 业务任务。用户明确表示开始、接手或着手执行任务时调用；必须使用查询结果中的真实 taskId。',
+    description: '启动一个 Spirit 业务任务。用户明确表示开始、接手或着手执行任务时调用；用户不需要提供 taskId，按自然指代自动定位，多个候选才确认。启动成功后，当前 Gateway 会立即向执行人发送状态通知，不等待旧系统通知，也不要再次调用 spirit_voice_notify。',
     parameters: {
       type: 'object',
       properties: {
-        taskId: { type: 'string', description: '真实 Spirit 任务 ID。' },
+        taskId: { type: 'string', description: '可选：已由工具结果返回的真实 Spirit 任务 ID。' },
+        reference: { type: 'string', description: '可选：用户对任务的自然指代。' },
       },
-      required: ['taskId'],
+      required: [],
       additionalProperties: false,
     },
   },
@@ -316,14 +327,15 @@ const spiritTaskCompleteTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_COMPLETE_TOOL_NAME,
-    description: '完成一个已知的 Spirit 业务任务，可附带完成备注。只有用户明确表达任务已经完成时调用；现场发现但尚未完成时应使用 spirit_task_add_comment。',
+    description: '完成一个 Spirit 业务任务，可附带完成备注。只有用户明确表达任务已经完成时调用；用户不需要提供 taskId，按自然指代自动定位，多个候选才确认。现场发现但尚未完成时应使用 spirit_task_add_comment。完成成功后，当前 Gateway 会立即向执行人发送状态通知，不等待旧系统通知，也不要再次调用 spirit_voice_notify。',
     parameters: {
       type: 'object',
       properties: {
-        taskId: { type: 'string', description: '真实 Spirit 任务 ID。' },
+        taskId: { type: 'string', description: '可选：已由工具结果返回的真实 Spirit 任务 ID。' },
+        reference: { type: 'string', description: '可选：用户对任务的自然指代。' },
         completionRemark: { type: 'string', description: '用户提供的完成说明；没有可省略。' },
       },
-      required: ['taskId'],
+      required: [],
       additionalProperties: false,
     },
   },
@@ -333,18 +345,19 @@ const spiritTaskUpdateStatusTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_UPDATE_STATUS_TOOL_NAME,
-    description: '通过 Spirit 专用状态接口修改任务状态。用于异常、待审批等明确状态流转；开始任务优先使用 spirit_task_start，完成任务优先使用 spirit_task_complete。',
+    description: '通过 Spirit 专用状态接口修改任务状态。用于异常、待审批等明确状态流转；用户不需要提供 taskId，按自然指代自动定位，多个候选才确认。开始任务优先使用 spirit_task_start，完成任务优先使用 spirit_task_complete。状态修改成功后，当前 Gateway 会立即向执行人发送状态通知，不等待旧系统通知，也不要再次调用 spirit_voice_notify。',
     parameters: {
       type: 'object',
       properties: {
-        taskId: { type: 'string', description: '真实 Spirit 任务 ID。' },
+        taskId: { type: 'string', description: '可选：已由工具结果返回的真实 Spirit 任务 ID。' },
+        reference: { type: 'string', description: '可选：用户对任务的自然指代。' },
         targetStatus: {
           type: 'string',
           enum: [...SPIRIT_TASK_STATUSES],
           description: 'Spirit 原始目标状态。',
         },
       },
-      required: ['taskId', 'targetStatus'],
+      required: ['targetStatus'],
       additionalProperties: false,
     },
   },
@@ -358,7 +371,8 @@ const spiritTaskAddCommentTool = {
     parameters: {
       type: 'object',
       properties: {
-        taskId: { type: 'string', description: '真实 Spirit 任务 ID。' },
+        taskId: { type: 'string', description: '可选：已由工具结果返回的真实 Spirit 任务 ID。' },
+        reference: { type: 'string', description: '可选：用户对任务的自然指代。' },
         content: { type: 'string', description: '需要追加的执行记录，最多 4000 字符。' },
         recordSource: {
           type: 'string',
@@ -366,7 +380,7 @@ const spiritTaskAddCommentTool = {
           description: '记录来源；直接记录用户现场汇报时使用 USER_DIALOGUE，默认 SYSTEM_AUTO。',
         },
       },
-      required: ['taskId', 'content'],
+      required: ['content'],
       additionalProperties: false,
     },
   },
@@ -376,14 +390,15 @@ const spiritTaskDeleteTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_DELETE_TOOL_NAME,
-    description: '删除一个 Spirit 任务。只有用户本轮明确要求删除并且已取得真实 taskId 时才能调用；confirmed 必须为 true。不得根据模糊指代猜测 taskId。',
+    description: '删除一个 Spirit 任务。只有用户本轮明确要求删除且任务已由 Gateway 唯一定位时才能调用；用户不需要提供 taskId，confirmed 必须为 true。多个候选不得猜测，先请用户确认。',
     parameters: {
       type: 'object',
       properties: {
-        taskId: { type: 'string', description: '要删除的真实 Spirit 任务 ID。' },
+        taskId: { type: 'string', description: '可选：已由工具结果返回的真实 Spirit 任务 ID。' },
+        reference: { type: 'string', description: '可选：用户对任务的自然指代。' },
         confirmed: { type: 'boolean', description: '用户本轮是否明确确认删除，必须为 true。' },
       },
-      required: ['taskId', 'confirmed'],
+      required: ['confirmed'],
       additionalProperties: false,
     },
   },
@@ -393,12 +408,12 @@ const spiritVoiceNotifyTool = {
   type: 'function',
   function: {
     name: SPIRIT_VOICE_NOTIFY_TOOL_NAME,
-    description: '不创建任务，单独向当前 Demo 人员发送一条语音通知。根据姓名或房号选择接收人，并严格以工具真实返回判断是否发送成功。',
+    description: '独立员工通讯工具：只在用户明确要求“通知、告诉、发消息”且不需要创建任务时调用。任务创建工具已经负责创建后的即时通知，不要在创建任务后再次调用本工具。根据姓名或房号选择接收人，并严格以工具真实返回判断是否发送成功。',
     parameters: {
       type: 'object',
       properties: {
         text: { type: 'string', description: '需要合成和发送的完整语音通知文本。' },
-        title: { type: 'string', description: '通知标题，默认“任务提醒”。' },
+        title: { type: 'string', description: '通知标题，默认“工作通知”。' },
         assigneeName: { type: 'string', description: '接收人姓名。' },
         roomNumber: { type: 'string', description: '用于按楼层匹配接收人的房号。' },
         floor: { type: 'integer', description: '用于匹配接收人的楼层。' },
@@ -517,6 +532,15 @@ export const permissionResponseInstructions = [
 ].join(' ')
 
 export function buildFrontendInstructions(agentContext = {}) {
+  const hasEnterpriseContext = Boolean(
+    String(agentContext.enterpriseContext?.prompt || '').trim(),
+  )
+  const supplementalContext = [
+    String(agentContext.supplementalContext || '').trim(),
+    ...(!hasEnterpriseContext && agentContext.toolProfile === HOTEL_DIRECT_TOOL_PROFILE
+      ? [buildSpiritTaskDispatchContext()]
+      : []),
+  ].filter(Boolean).join('\n\n')
   return [
     loadFrontendPrompt(),
     '# Assistant Profile',
@@ -525,7 +549,7 @@ export function buildFrontendInstructions(agentContext = {}) {
     '</assistant_profile>',
     buildFrontendContext({
       ...agentContext,
-      supplementalContext: buildSpiritTaskDispatchContext(),
+      supplementalContext,
     }),
   ].join('\n\n')
 }

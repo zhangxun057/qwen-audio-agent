@@ -23,11 +23,12 @@ import {
 import { currentTimeSnapshot } from '../../conversation/frontend-agent-context.mjs'
 import { canonicalScope, isMemoryDocument } from '../../core/memory-scopes.mjs'
 import {
+  buildSpiritTaskExecutor,
   buildSpiritTaskUsers,
   normalizeSpiritTaskSummary,
   resolveSpiritAssignee,
   SPIRIT_DEMO_CHANNEL,
-  SPIRIT_DEMO_CREATOR,
+  SPIRIT_DEMO_SELF_TEST_ACCOUNT,
 } from '../spirit-task-directory.mjs'
 import {
   SPIRIT_TASK_RECORD_SOURCES,
@@ -51,6 +52,199 @@ function failure(errorCode, userMessage, {
   }
 }
 
+class TaskReferenceError extends Error {
+  constructor(code, userMessage) {
+    super(userMessage)
+    this.code = code
+    this.userMessage = userMessage
+  }
+}
+
+function compactTaskText(value) {
+  return String(value || '')
+    .toLocaleLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+}
+
+function normalizeTaskReference(value) {
+  return compactTaskText(value)
+    .replace(/(?:这个|那个|刚才|刚刚|上一(?:个|项)|任务|那项)/gu, '')
+}
+
+const SPIRIT_TASK_TIME_ZONE = 'Asia/Shanghai'
+
+function standardTaskDurationMinutes(request) {
+  const text = String(request || '').replace(/\s+/gu, '')
+  if (!text) return null
+  const extended = /跨楼层|跨区|跨区域/u.test(text)
+  if (/(?:客房)?送[^，。；;]{0,20}(?:水|毛巾|物)|送到房/u.test(text)) return extended ? 12 : 7
+  if (/(?:住中|续住|退房)?清洁|清洁房间/u.test(text)) return 30
+  if (/(?:身份核验)?开门|核验.*开门/u.test(text)) return extended ? 12 : 7
+  if (/(?:住中需求|续住|换房|延迟退房|叫醒)/u.test(text)) return extended ? 12 : 7
+  return null
+}
+
+function parseSpiritLocalDateTime(value) {
+  const text = String(value || '').trim()
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/u.test(text)) return null
+  const date = new Date(`${text.replace(' ', 'T')}+08:00`)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function formatSpiritLocalDateTime(date) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: SPIRIT_TASK_TIME_ZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(date).map(part => [part.type, part.value]),
+  )
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`
+}
+
+function resolveSpiritPlanTimes({ request, executeTime, completeTime, now = new Date() }) {
+  let resolvedExecute = String(executeTime || '').trim() || undefined
+  let resolvedComplete = String(completeTime || '').trim() || undefined
+  const duration = standardTaskDurationMinutes(request)
+  if (duration) {
+    if (resolvedExecute && !resolvedComplete) {
+      const start = parseSpiritLocalDateTime(resolvedExecute)
+      if (start) resolvedComplete = formatSpiritLocalDateTime(
+        new Date(start.getTime() + duration * 60_000),
+      )
+    } else if (!resolvedExecute && resolvedComplete) {
+      const deadline = parseSpiritLocalDateTime(resolvedComplete)
+      if (deadline) resolvedExecute = formatSpiritLocalDateTime(
+        new Date(deadline.getTime() - duration * 60_000),
+      )
+    } else if (!resolvedExecute && !resolvedComplete) {
+      resolvedComplete = formatSpiritLocalDateTime(
+        new Date(now.getTime() + duration * 60_000),
+      )
+    }
+  }
+  return {
+    executeTime: resolvedExecute,
+    completeTime: resolvedComplete,
+    status: resolvedExecute ? 'PENDING_RECEIPT' : 'IN_PROGRESS',
+  }
+}
+
+function taskRecords(result) {
+  if (Array.isArray(result)) return result
+  if (Array.isArray(result?.records)) return result.records
+  if (Array.isArray(result?.list)) return result.list
+  if (Array.isArray(result?.tasks)) return result.tasks
+  return []
+}
+
+function taskIdFromRecord(record) {
+  return String(record?.taskId || record?.id || '').trim()
+}
+
+function taskCandidateLabel(record) {
+  const id = taskIdFromRecord(record)
+  const summary = String(record?.summary || record?.title || '').trim()
+  const users = Array.isArray(record?.users) ? record.users : []
+  const assignee = users
+    .filter(user => String(user?.userRole || '').toUpperCase() === 'EXECUTOR')
+    .map(user => String(user?.userName || user?.name || '').trim())
+    .filter(Boolean)
+    .join('、')
+  return [summary, assignee, id].filter(Boolean).join('｜')
+}
+
+function projectTaskUser(user) {
+  return {
+    userId: user?.userId,
+    userName: user?.userName || user?.name,
+    userRole: user?.userRole || user?.roleCode,
+  }
+}
+
+function projectTaskRecord(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return record
+  const users = Array.isArray(record.users)
+    ? record.users.map(projectTaskUser)
+    : Array.isArray(record.executors)
+      ? record.executors.map(projectTaskUser)
+      : []
+  const executor = users.find(user => String(user?.userRole || '').toUpperCase() === 'EXECUTOR')
+  const creator = users.find(user => String(user?.userRole || '').toUpperCase() === 'CREATOR')
+  const statusLabels = {
+    PENDING_ADMISSION: '待受理',
+    PENDING_RECEIPT: '待受理',
+    TODO: '待处理',
+    IN_PROGRESS: '进行中',
+    PENDING_APPROVAL: '待审批',
+    DONE: '已完成',
+    EXCEPTION: '异常',
+  }
+  return {
+    taskId: record.taskId || record.id,
+    summary: record.summary || record.title,
+    description: record.description,
+    taskOpeningPrompt: record.taskOpeningPrompt,
+    status: record.status,
+    statusLabel: statusLabels[record.status] || record.status,
+    acceptTime: record.acceptTime,
+    executeTime: record.executeTime,
+    completeTime: record.completeTime,
+    completionRemark: record.completionRemark,
+    createTime: record.createTime,
+    executor,
+    creator,
+    users,
+    subTasks: Array.isArray(record.subTasks)
+      ? record.subTasks.slice(0, 20).map(subTask => ({
+          taskId: subTask?.taskId || subTask?.id,
+          summary: subTask?.summary || subTask?.title,
+          status: subTask?.status,
+        }))
+      : [],
+  }
+}
+
+function projectTaskQueryResult(toolName, result) {
+  if (toolName === SPIRIT_TASK_LIST_TOOL_NAME) {
+    if (Array.isArray(result)) return result.map(projectTaskRecord)
+    if (result && typeof result === 'object') {
+      const records = taskRecords(result)
+      return {
+        current: result.current,
+        pageSize: result.pageSize,
+        total: result.total,
+        totalPages: result.totalPages,
+        records: records.map(projectTaskRecord),
+      }
+    }
+  }
+  if (toolName === SPIRIT_TASK_DETAIL_TOOL_NAME) return projectTaskRecord(result)
+  if (toolName === SPIRIT_TASK_COMMENTS_TOOL_NAME) {
+    const projectComment = comment => ({
+      id: comment?.id,
+      content: comment?.content || comment?.remark || comment?.text,
+      recordSource: comment?.recordSource,
+      operatorName: comment?.operatorName || comment?.userName,
+      createTime: comment?.createTime,
+    })
+    if (Array.isArray(result)) return result.slice(0, 100).map(projectComment)
+    if (result && typeof result === 'object') {
+      const records = taskRecords(result)
+      return {
+        total: result.total,
+        records: records.slice(0, 100).map(projectComment),
+      }
+    }
+  }
+  return result
+}
+
 export class ToolCallHandler {
   constructor({
     taskManager,
@@ -66,6 +260,9 @@ export class ToolCallHandler {
     notesStore,
     getClientContext = () => ({}),
     getConversationContext = () => [],
+    getTaskContext = () => [],
+    getEnterpriseContext = async () => null,
+    onTaskContextChanged = () => {},
     onMemoryChanged = () => {},
     respondPermission,
     permissionPolicy,
@@ -87,6 +284,9 @@ export class ToolCallHandler {
     this.notesStore = notesStore
     this.getClientContext = getClientContext
     this.getConversationContext = getConversationContext
+    this.getTaskContext = getTaskContext
+    this.getEnterpriseContext = getEnterpriseContext
+    this.onTaskContextChanged = onTaskContextChanged
     this.onMemoryChanged = onMemoryChanged
     this.respondPermission = respondPermission
     this.permissionPolicy = permissionPolicy
@@ -118,6 +318,9 @@ export class ToolCallHandler {
       { turnId, taskId, ...(responseContext || {}) },
       frontendOptions,
     )
+    if (output?.status === 'ok' && output?.source === 'spirit-api-direct') {
+      this.onTaskContextChanged(output)
+    }
   }
 
   beginDeferredToolResponse(responseId, { turnId, turnGeneration } = {}) {
@@ -664,6 +867,111 @@ export class ToolCallHandler {
     )
   }
 
+  async resolveSpiritTaskId(args = {}) {
+    const directId = String(args.taskId || '').trim()
+    if (directId) return directId
+
+    const reference = String(args.reference || '').trim()
+    const facts = Array.isArray(this.getTaskContext?.())
+      ? this.getTaskContext().filter(fact => String(fact?.taskId || '').trim())
+      : []
+    const normalizedReference = normalizeTaskReference(reference)
+    const genericReference = !normalizedReference
+    if (genericReference && facts.length) {
+      return String(facts[0].taskId).trim()
+    }
+
+    const factMatches = normalizedReference
+      ? facts.filter(fact => {
+          const haystack = compactTaskText([
+            fact.summary,
+            fact.assignee,
+            fact.note,
+            fact.taskId,
+          ].join(' '))
+          return haystack.includes(normalizedReference) || normalizedReference.includes(haystack)
+        })
+      : []
+    if (factMatches.length === 1) return String(factMatches[0].taskId).trim()
+    if (factMatches.length > 1) {
+      throw new TaskReferenceError(
+        'task_reference_ambiguous',
+        `找到多个相近任务：${factMatches.slice(0, 3).map(fact => fact.summary || fact.taskId).join('、')}，请说清房号或标题。`,
+      )
+    }
+
+    if (!this.spiritTaskClient?.list) {
+      throw new TaskReferenceError('task_reference_missing', '没有找到可定位的任务，请说房号或任务标题。')
+    }
+    const keyword = reference.match(/\d{3,5}/u)?.[0] || reference
+    const result = await this.spiritTaskClient.list({
+      keyword: keyword || undefined,
+      requestNum: 20,
+      taskView: 'ALL',
+    })
+    const records = taskRecords(result)
+    const normalizedCandidates = normalizedReference
+      ? records.filter(record => {
+          const haystack = compactTaskText([
+            record?.summary,
+            record?.title,
+            record?.description,
+            ...(Array.isArray(record?.users)
+              ? record.users.flatMap(user => [user?.userName, user?.name])
+              : []),
+            taskIdFromRecord(record),
+          ].join(' '))
+          return haystack.includes(normalizedReference) || normalizedReference.includes(haystack)
+        })
+      : records
+    if (normalizedCandidates.length === 1) return taskIdFromRecord(normalizedCandidates[0])
+    if (normalizedCandidates.length > 1) {
+      throw new TaskReferenceError(
+        'task_reference_ambiguous',
+        `找到多个相近任务：${normalizedCandidates.slice(0, 3).map(taskCandidateLabel).join('；')}，请说清房号或标题。`,
+      )
+    }
+    throw new TaskReferenceError(
+      'task_reference_not_found',
+      reference
+        ? `没有找到“${reference}”对应的任务，请说房号或任务标题。`
+        : '没有找到可定位的任务，请说房号或任务标题。',
+    )
+  }
+
+  async existingSpiritAssignee(taskId) {
+    if (!this.spiritTaskClient?.detail) return null
+    const detail = await this.spiritTaskClient.detail(taskId)
+    const users = detail?.users || detail?.executors || detail?.task?.users
+    if (!Array.isArray(users)) return null
+    const executor = users.find(user => (
+      String(user?.userRole || user?.roleCode || '').toUpperCase() === 'EXECUTOR'
+    ))
+    if (!executor?.userId) return null
+    return {
+      userId: String(executor.userId).trim(),
+      name: String(executor.userName || executor.name || '').trim(),
+    }
+  }
+
+  async taskStateNotification(assignee, text) {
+    if (!assignee?.userId) return { status: 'not_available' }
+    if (!this.spiritVoiceNotifier?.configured) return { status: 'not_configured' }
+    try {
+      return await this.spiritVoiceNotifier.notify({
+        recipientId: assignee.userId,
+        recipientName: assignee.name,
+        title: '工作通知',
+        text,
+      })
+    } catch (error) {
+      return {
+        status: 'failed',
+        error: String(error?.message || error),
+      }
+    }
+  }
+
   async handleSpiritTask(callId, turnId, toolName, args) {
     if (!this.spiritTaskClient) {
       await this.sendOutput(callId, {
@@ -672,32 +980,33 @@ export class ToolCallHandler {
       }, turnId)
       return
     }
-    const taskId = String(args.taskId || '').trim()
-    if (toolName !== SPIRIT_TASK_LIST_TOOL_NAME && !taskId) {
-      await this.sendOutput(callId, {
-        status: 'error', error: true, error_code: 'missing_task_id',
-        user_message: '查询任务详情需要明确的任务 ID。', retryable: true,
-      }, turnId)
-      return
-    }
     try {
+      const taskId = toolName === SPIRIT_TASK_LIST_TOOL_NAME
+        ? ''
+        : await this.resolveSpiritTaskId(args)
+      const enterpriseContext = toolName === SPIRIT_TASK_LIST_TOOL_NAME
+        ? await this.getEnterpriseContext()
+        : null
+      const subjectUserId = String(enterpriseContext?.subject?.userId || '').trim()
       const result = toolName === SPIRIT_TASK_LIST_TOOL_NAME
         ? await this.spiritTaskClient.list({
             ...args,
+            userId: args.scope === 'MY' ? subjectUserId : undefined,
             requestNum: Math.min(20, Number(args.requestNum) || 20),
           })
         : toolName === SPIRIT_TASK_DETAIL_TOOL_NAME
           ? await this.spiritTaskClient.detail(taskId)
           : await this.spiritTaskClient.comments(taskId)
+      const projectedResult = projectTaskQueryResult(toolName, result)
       await this.sendOutput(callId, {
-        status: 'ok', source: 'spirit-api-direct', result,
-      }, turnId, null, {
+        status: 'ok', source: 'spirit-api-direct', result: projectedResult,
+      }, turnId, toolName === SPIRIT_TASK_LIST_TOOL_NAME ? null : taskId, {
         response: {
           instructions: [
             '第一句话直接说任务信息，不要任何开场、概述或查询确认。',
             '禁止说“我查到了”“目前系统中”“给您说几个”“任务列表如下”。',
             '列表逐条只说标题、状态、执行人等用户需要的字段；能一句说清就只说一句。',
-            '状态使用自然中文：IN_PROGRESS说“进行中”，DONE说“已完成”，PENDING说“待处理”，CANCELLED说“已取消”；不要朗读英文枚举值。',
+            '优先使用结果中的 statusLabel 和 executor.userName；状态使用自然中文，不要朗读英文枚举值。',
             '不要提后台 Agent、函数名、接口名、缓存或内部字段。',
             '结果为空时只说“没有查到任务”。',
           ].join(' '),
@@ -705,7 +1014,8 @@ export class ToolCallHandler {
       })
     } catch (error) {
       await this.sendOutput(callId, {
-        status: 'error', error: true, error_code: 'task_query_failed',
+        status: 'error', error: true,
+        error_code: error?.code || 'task_query_failed',
         user_message: String(error?.message || error), retryable: true,
       }, turnId, null, {
         response: {
@@ -737,16 +1047,36 @@ export class ToolCallHandler {
       ) {
         throw new Error('selfTest 只允许用于用户明确提出且要求不通知任何人的自测任务')
       }
+      const enterpriseContext = await this.getEnterpriseContext()
+      const creator = {
+        userId: String(enterpriseContext?.subject?.userId || '').trim(),
+        userName: String(enterpriseContext?.subject?.displayName || '').trim(),
+      }
+      if (!creator.userId || !creator.userName) {
+        throw new Error('当前会话没有可用的登录身份，不能创建任务')
+      }
+      const selfRequested = /(?:我自己|我本人|给我|由我执行)/u.test(
+        `${String(args.assigneeName || '')} ${request}`,
+      )
       const assignee = selfTest
         ? {
-            name: SPIRIT_DEMO_CREATOR.userName,
-            userId: SPIRIT_DEMO_CREATOR.userId,
+            name: SPIRIT_DEMO_SELF_TEST_ACCOUNT.userName,
+            userId: SPIRIT_DEMO_SELF_TEST_ACCOUNT.userId,
             department: '系统自测',
             floors: [],
             matchedBy: 'self-test',
             matchedFloor: null,
           }
-        : resolveSpiritAssignee({
+        : selfRequested
+          ? {
+              name: creator.userName,
+              userId: creator.userId,
+              department: '当前登录用户',
+              floors: [],
+              matchedBy: 'current-login-identity',
+              matchedFloor: null,
+            }
+          : resolveSpiritAssignee({
             assigneeName: args.assigneeName,
             roomNumber: args.roomNumber,
             floor: args.floor,
@@ -754,6 +1084,11 @@ export class ToolCallHandler {
           })
       const summary = normalizeSpiritTaskSummary(args.summary || request)
       const description = String(args.description || request).trim()
+      const plan = resolveSpiritPlanTimes({
+        request,
+        executeTime: args.executeTime,
+        completeTime: args.completeTime,
+      })
       const payload = {
         summary,
         description,
@@ -766,9 +1101,11 @@ export class ToolCallHandler {
             files: [],
           },
         },
-        status: 'IN_PROGRESS',
+        status: plan.status,
+        ...(plan.executeTime ? { executeTime: plan.executeTime } : {}),
+        ...(plan.completeTime ? { completeTime: plan.completeTime } : {}),
         ...SPIRIT_DEMO_CHANNEL,
-        users: buildSpiritTaskUsers(assignee),
+        users: buildSpiritTaskUsers(assignee, { creator }),
         recommendedActions: [],
       }
       const created = await this.spiritTaskClient.create(payload)
@@ -776,7 +1113,7 @@ export class ToolCallHandler {
       if (!taskId) throw new Error('任务接口返回成功，但没有 taskId')
 
       let notification = { status: 'disabled' }
-      if (!selfTest && args.notify !== false) {
+      if (!selfTest) {
         if (!this.spiritVoiceNotifier?.configured) {
           notification = { status: 'not_configured' }
         } else {
@@ -784,7 +1121,7 @@ export class ToolCallHandler {
             notification = await this.spiritVoiceNotifier.notify({
               recipientId: assignee.userId,
               recipientName: assignee.name,
-              title: '任务提醒',
+              title: '工作通知',
               text: `您有一个新任务【${summary}】，请立即执行。`,
             })
           } catch (error) {
@@ -810,7 +1147,7 @@ export class ToolCallHandler {
         },
         notification,
         result: created,
-      }, turnId, null, {
+      }, turnId, taskId, {
         response: {
           instructions: [
             '直接说“任务已派给某人”，必要时补充通知结果；不要开场或解释过程。',
@@ -843,8 +1180,7 @@ export class ToolCallHandler {
       return
     }
     try {
-      const taskId = String(args.taskId || '').trim()
-      if (!taskId) throw new Error('修改任务需要真实 taskId')
+      const taskId = await this.resolveSpiritTaskId(args)
       const payload = { taskId }
       if (args.status) payload.status = String(args.status)
       if (args.description !== undefined) {
@@ -857,12 +1193,44 @@ export class ToolCallHandler {
           roomNumber: args.roomNumber,
           floor: args.floor,
         })
-        payload.executors = [buildSpiritTaskUsers(assignee)[1]]
+        payload.executors = [buildSpiritTaskExecutor(assignee)]
       }
-      if (Object.keys(payload).length === 1) {
-        throw new Error('请至少提供状态、描述或新的执行人')
+      if (!assignee && payload.status) {
+        try {
+          assignee = await this.existingSpiritAssignee(taskId)
+        } catch {
+          assignee = null
+        }
       }
-      const result = await this.spiritTaskClient.update(payload)
+      const hasPlanTime = ['executeTime', 'completeTime'].some(field => args[field] !== undefined)
+      let planTime
+      if (hasPlanTime) {
+        const current = this.spiritTaskClient.detail
+          ? await this.spiritTaskClient.detail(taskId)
+          : {}
+        planTime = {
+          acceptTime: current?.acceptTime ?? null,
+          executeTime: args.executeTime ?? current?.executeTime ?? null,
+          completeTime: args.completeTime ?? current?.completeTime ?? null,
+        }
+      }
+      if (Object.keys(payload).length === 1 && !hasPlanTime) {
+        throw new Error('请至少提供状态、描述、执行人或要求时间')
+      }
+      const result = Object.keys(payload).length > 1
+        ? await this.spiritTaskClient.update(payload)
+        : null
+      const planResult = hasPlanTime
+        ? await this.spiritTaskClient.updatePlanTime(taskId, planTime)
+        : null
+      const notification = assignee
+        ? await this.taskStateNotification(
+            assignee,
+            payload.executors
+              ? '有一项任务已重新分配给您，请立即查看并执行。'
+              : '任务状态已更新，请继续处理。',
+          )
+        : { status: 'not_required' }
       await this.sendOutput(callId, {
         status: 'ok',
         source: 'spirit-api-direct',
@@ -872,11 +1240,19 @@ export class ToolCallHandler {
           status: payload.status,
           description: payload.description,
           assignee: assignee?.name,
+          executeTime: planTime?.executeTime,
+          completeTime: planTime?.completeTime,
         },
+        notification,
         result,
-      }, turnId, null, {
+        planResult,
+      }, turnId, taskId, {
         response: {
-          instructions: '自然说明实际修改了什么；不要朗读 taskId、userId、接口名或空字段。',
+          instructions: [
+            '自然说明实际修改了什么；不要朗读 taskId、userId、接口名或空字段。',
+            '只有 notification.status=sent 才能说已经通知；failed、not_configured、not_available 或 skipped_by_gate 必须明确说明任务已改但通知未成功。',
+            'notification.status=not_required 表示本次没有需要通知的状态变化，不要谈通知。',
+          ].join(' '),
         },
       })
     } catch (error) {
@@ -898,18 +1274,20 @@ export class ToolCallHandler {
       return
     }
     try {
-      const taskId = String(args.taskId || '').trim()
-      if (!taskId) throw new Error('开始任务需要真实 taskId')
+      const taskId = await this.resolveSpiritTaskId(args)
+      let assignee = null
+      try { assignee = await this.existingSpiritAssignee(taskId) } catch { assignee = null }
       const result = await this.spiritTaskClient.start(taskId)
       await this.sendOutput(callId, {
         status: 'ok',
         source: 'spirit-api-direct',
         action: 'started',
         taskId,
+        notification: await this.taskStateNotification(assignee, '任务已开始执行，请继续处理。'),
         result,
-      }, turnId, null, {
+      }, turnId, taskId, {
         response: {
-          instructions: '只说任务已经开始或已接手；不要开场，不要朗读 taskId、接口名或内部字段。',
+          instructions: '只说任务已经开始或已接手；只有通知结果为 sent 才能说已经通知执行人；不要开场，不要朗读 taskId、接口名或内部字段。',
         },
       })
     } catch (error) {
@@ -931,14 +1309,15 @@ export class ToolCallHandler {
       return
     }
     try {
-      const taskId = String(args.taskId || '').trim()
-      if (!taskId) throw new Error('完成任务需要真实 taskId')
+      const taskId = await this.resolveSpiritTaskId(args)
       const completionRemark = args.completionRemark === undefined
         ? undefined
         : String(args.completionRemark || '').trim() || undefined
       if (completionRemark && completionRemark.length > 4_000) {
         throw new Error('完成备注不能超过 4000 个字符')
       }
+      let assignee = null
+      try { assignee = await this.existingSpiritAssignee(taskId) } catch { assignee = null }
       const result = await this.spiritTaskClient.complete(taskId, completionRemark)
       await this.sendOutput(callId, {
         status: 'ok',
@@ -946,10 +1325,11 @@ export class ToolCallHandler {
         action: 'completed',
         taskId,
         completionRemark,
+        notification: await this.taskStateNotification(assignee, '任务已完成，请查看结果。'),
         result,
-      }, turnId, null, {
+      }, turnId, taskId, {
         response: {
-          instructions: '直接说任务已完成；有完成说明时用一句自然短句带上，不要朗读 taskId、接口名或内部字段。',
+          instructions: '直接说任务已完成；有完成说明时用一句自然短句带上。只有通知结果为 sent 才能说已经通知执行人。不要朗读 taskId、接口名或内部字段。',
         },
       })
     } catch (error) {
@@ -971,12 +1351,13 @@ export class ToolCallHandler {
       return
     }
     try {
-      const taskId = String(args.taskId || '').trim()
+      const taskId = await this.resolveSpiritTaskId(args)
       const targetStatus = String(args.targetStatus || '').trim()
-      if (!taskId) throw new Error('修改任务状态需要真实 taskId')
       if (!SPIRIT_TASK_STATUSES.includes(targetStatus)) {
         throw new Error('目标状态不是 Spirit 支持的原始状态')
       }
+      let assignee = null
+      try { assignee = await this.existingSpiritAssignee(taskId) } catch { assignee = null }
       const result = await this.spiritTaskClient.updateStatus(taskId, targetStatus)
       await this.sendOutput(callId, {
         status: 'ok',
@@ -984,10 +1365,11 @@ export class ToolCallHandler {
         action: 'status_updated',
         taskId,
         targetStatus,
+        notification: await this.taskStateNotification(assignee, `任务状态已更新为 ${targetStatus}，请继续处理。`),
         result,
-      }, turnId, null, {
+      }, turnId, taskId, {
         response: {
-          instructions: '只用自然中文说明任务的新状态；不要朗读英文状态、taskId、接口名或内部字段。',
+          instructions: '只用自然中文说明任务的新状态；只有通知结果为 sent 才能说已经通知执行人。不要朗读英文状态、taskId、接口名或内部字段。',
         },
       })
     } catch (error) {
@@ -1009,10 +1391,9 @@ export class ToolCallHandler {
       return
     }
     try {
-      const taskId = String(args.taskId || '').trim()
+      const taskId = await this.resolveSpiritTaskId(args)
       const content = String(args.content || '').trim()
       const recordSource = String(args.recordSource || 'SYSTEM_AUTO').trim()
-      if (!taskId) throw new Error('追加任务记录需要真实 taskId')
       if (!content) throw new Error('任务记录内容不能为空')
       if (content.length > 4_000) throw new Error('任务记录不能超过 4000 个字符')
       if (!SPIRIT_TASK_RECORD_SOURCES.includes(recordSource)) {
@@ -1033,7 +1414,7 @@ export class ToolCallHandler {
         recordSource,
         content,
         result,
-      }, turnId, null, {
+      }, turnId, taskId, {
         response: {
           instructions: '直接说记录已补充，并用最短自然句概括内容；不要说“评论”、资料来源、taskId、接口名或内部字段。',
         },
@@ -1057,11 +1438,10 @@ export class ToolCallHandler {
       return
     }
     try {
-      const taskId = String(args.taskId || '').trim()
+      const taskId = await this.resolveSpiritTaskId(args)
       const transcript = String(
         await this.transcripts?.transcript(turnId) || '',
       ).trim()
-      if (!taskId) throw new Error('删除任务需要真实 taskId')
       if (args.confirmed !== true || !/(?:删除|删掉|移除|作废)/u.test(transcript)) {
         throw new Error('用户本轮没有明确确认删除，已拒绝执行')
       }
@@ -1072,7 +1452,7 @@ export class ToolCallHandler {
         action: 'deleted',
         taskId,
         result,
-      }, turnId, null, {
+      }, turnId, taskId, {
         response: {
           instructions: '只说明指定任务已删除，不要朗读 taskId、接口名或内部字段。',
         },
@@ -1102,7 +1482,7 @@ export class ToolCallHandler {
       const notification = await this.spiritVoiceNotifier.notify({
         recipientId: assignee.userId,
         recipientName: assignee.name,
-        title: String(args.title || '任务提醒').trim(),
+        title: String(args.title || '工作通知').trim(),
         text,
       })
       await this.sendOutput(callId, {

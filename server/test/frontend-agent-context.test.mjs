@@ -98,6 +98,19 @@ test('accepts trusted supplemental context from the owning frontend layer', () =
   assert.match(context, /<demo_dispatch>8楼负责人=黄维维<\/demo_dispatch>/)
 })
 
+test('injects recent confirmed task facts without replaying full history', () => {
+  const context = buildFrontendContext({
+    taskContext: [{
+      taskId: 'task-1', summary: '8201房送2瓶水',
+      status: 'IN_PROGRESS', assignee: '黄维维',
+    }],
+  })
+  assert.match(context, /<recent_task_context>/)
+  assert.match(context, /task_id=task-1/)
+  assert.match(context, /title=8201房送2瓶水/)
+  assert.match(context, /assignee=黄维维/)
+})
+
 test('keeps mutable task state out of persistent frontend instructions', () => {
   const context = buildFrontendContext({
     activeTasks: [

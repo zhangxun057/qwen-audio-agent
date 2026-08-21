@@ -153,6 +153,18 @@ export function resolveOpenCodeCoordinatorAgent(env = process.env) {
 }
 
 const realtimeFrontend = resolveRealtimeFrontendConfiguration(process.env)
+const voiceToolProfile = String(
+  process.env.QWEN_AUDIO_AGENT_TOOL_PROFILE || 'standard',
+).trim().toLowerCase()
+const contextMode = String(
+  process.env.QWEN_AUDIO_CONTEXT_MODE
+  || (voiceToolProfile === 'hotel-direct' ? 'mock' : 'off'),
+).trim().toLowerCase()
+if (!['off', 'mock', 'http'].includes(contextMode)) {
+  throw new Error(
+    `不支持的语音上下文模式：${contextMode}（可选 off、mock、http）`,
+  )
+}
 
 export const config = {
   root,
@@ -163,9 +175,42 @@ export const config = {
     ? 0
     : numberSetting(process.env.PORT, 3101, { min: 1, max: 65535 }),
   audioProvider: realtimeFrontend.provider,
-  voiceToolProfile: String(
-    process.env.QWEN_AUDIO_AGENT_TOOL_PROFILE || 'standard',
-  ).trim().toLowerCase(),
+  voiceToolProfile,
+  contextMode,
+  // hotel-direct ships with one static contract-shaped context so the full
+  // userId -> Context Service -> Realtime instructions path works before a
+  // production context service exists. Deployments should set both IDs from
+  // trusted login/session state rather than accepting model-generated values.
+  contextId: String(
+    process.env.QWEN_AUDIO_CONTEXT_ID
+    || (voiceToolProfile === 'hotel-direct' ? 'hotel-10082-daily' : ''),
+  ).trim(),
+  contextUserId: String(
+    process.env.QWEN_AUDIO_CONTEXT_USER_ID
+    || (voiceToolProfile === 'hotel-direct' ? 'demo-user-hotel-10082' : ''),
+  ).trim(),
+  contextServiceUrl: String(
+    process.env.QWEN_AUDIO_CONTEXT_SERVICE_URL || '',
+  ).trim().replace(/\/+$/, ''),
+  contextServiceToken: String(
+    process.env.QWEN_AUDIO_CONTEXT_SERVICE_TOKEN || '',
+  ).trim(),
+  contextMockDirectory: process.env.QWEN_AUDIO_CONTEXT_MOCK_DIR
+    ? resolve(root, process.env.QWEN_AUDIO_CONTEXT_MOCK_DIR)
+    : resolve(root, 'config/hotel-direct/context-mock'),
+  contextServiceTimeoutMs: numberSetting(
+    process.env.QWEN_AUDIO_CONTEXT_SERVICE_TIMEOUT_MS,
+    2500,
+    { min: 100, max: 30_000 },
+  ),
+  contextMaxPromptChars: numberSetting(
+    process.env.QWEN_AUDIO_CONTEXT_MAX_PROMPT_CHARS,
+    32_000,
+    { min: 1000, max: 56_000 },
+  ),
+  contextFallbackToMock: String(
+    process.env.QWEN_AUDIO_CONTEXT_FALLBACK_TO_MOCK || 'true',
+  ).toLowerCase() === 'true',
   realtimeConfigSignature: realtimeFrontend.signature,
   dashscopeApiKey: realtimeFrontend.dashscopeApiKey,
   audioRealtimeBaseUrl: realtimeFrontend.dashscopeRealtimeUrl,

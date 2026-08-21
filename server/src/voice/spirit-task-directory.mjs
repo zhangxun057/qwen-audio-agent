@@ -4,9 +4,9 @@ export const SPIRIT_DEMO_CHANNEL = Object.freeze({
   roleCode: '2',
 })
 
-export const SPIRIT_DEMO_CREATOR = Object.freeze({
-  userId: '2079698_hotel_10082',
-  userName: '全双工语音助手',
+export const SPIRIT_DEMO_SELF_TEST_ACCOUNT = Object.freeze({
+  userId: 'demo-user-hotel-10082',
+  userName: '语音助手自测',
 })
 
 export const SPIRIT_DEMO_STAFF = Object.freeze([
@@ -47,8 +47,8 @@ export const SPIRIT_DEMO_STAFF = Object.freeze([
     floorFallback: false,
   }),
   Object.freeze({
-    name: '张洵总裁',
-    aliases: Object.freeze(['张洵']),
+    name: '张洵',
+    aliases: Object.freeze([]),
     userId: '2079697_hotel_10082',
     directoryDepartment: '前台部、客房部',
     rosterDepartment: '客房部',
@@ -308,9 +308,12 @@ export function resolveSpiritAssignee({
 }
 
 export function buildSpiritTaskUsers(assignee, {
-  creator = SPIRIT_DEMO_CREATOR,
+  creator,
   channel = SPIRIT_DEMO_CHANNEL,
 } = {}) {
+  if (!String(creator?.userId || '').trim() || !String(creator?.userName || '').trim()) {
+    throw new Error('创建任务需要当前登录用户身份')
+  }
   const common = {
     channelType: channel.channelType,
     channelCode: channel.channelCode,
@@ -324,12 +327,22 @@ export function buildSpiritTaskUsers(assignee, {
       userRole: 'CREATOR',
     },
     {
-      ...common,
-      userId: assignee.userId,
-      userName: assignee.name,
-      userRole: 'EXECUTOR',
+      ...buildSpiritTaskExecutor(assignee, { channel }),
     },
   ]
+}
+
+export function buildSpiritTaskExecutor(assignee, {
+  channel = SPIRIT_DEMO_CHANNEL,
+} = {}) {
+  return {
+    channelType: channel.channelType,
+    channelCode: channel.channelCode,
+    roleCode: channel.roleCode,
+    userId: assignee.userId,
+    userName: assignee.name,
+    userRole: 'EXECUTOR',
+  }
 }
 
 export function buildSpiritTaskDispatchContext() {
@@ -345,8 +358,9 @@ export function buildSpiritTaskDispatchContext() {
     '回答房号负责人时只报结果，例如“1601房派刘嘉豪”。禁止说“根据员工卡片”“根据映射”“系统显示”；除非用户追问，不解释依据。',
     '创建任务时调用 spirit_task_create：request 忠实保留用户原话；summary 写成简短任务标题，例如“8201房送2瓶水”；不要把姓名、工具名或执行过程塞进标题。',
     '仅当用户明确说“自测且不通知任何人”时，创建工具可传 selfTest=true；此模式强制派给系统测试账号并关闭通知，不能用于普通酒店任务。',
-    '创建工具会自动写入正确 userId，并在 notify=true 时尝试向执行人发送语音通知。工具返回前不得声称创建或通知成功。',
-    '查询、修改、删除任务必须使用准确 taskId。删除只有在用户本轮明确要求删除时才允许。',
+    '普通任务创建成功后，Gateway 必须立即尝试通知执行人；只有明确的无通知自测才关闭通知。工具返回前不得声称创建或通知成功。',
+    '用户不需要提供 taskId 或 userId；用户按房号、标题或自然指代查询、修改、开始、完成、记录或删除任务时，由 Gateway 自动定位真实 taskId；只有没有候选或多个候选时才确认。查询“我的任务”使用当前登录身份。',
+    '用户说“要求几点完成”或“改到某时完成”时，在创建或任务修改工具中填写 completeTime；不得把要求完成时间写进 description。',
     '</spirit_task_dispatch>',
   ].join('\n')
 }

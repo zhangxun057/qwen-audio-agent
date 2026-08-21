@@ -120,6 +120,7 @@ export function attachRealtimeGateway(server, {
   backendAvailability = null,
   respondPermission,
   permissionPolicy,
+  contextService = null,
 }) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 })
   const activeVoiceClients = new ActiveVoiceClients()
@@ -171,6 +172,7 @@ export function attachRealtimeGateway(server, {
     connectionLogger.info('voice_client.connected')
     let frontend
     let connectPromise
+    let enterpriseContextPromise
     let pendingAudio = []
     let turnId = ''
     let turnGeneration = 0
@@ -210,6 +212,60 @@ export function attachRealtimeGateway(server, {
     const transcripts = new TurnTranscripts()
     const announcedPermissions = new Set()
     let permissionRetryTimer = null
+    const loadEnterpriseContext = () => {
+      if (!enterpriseContextPromise) {
+        enterpriseContextPromise = contextService?.resolveForSession({ ownerId })
+          || Promise.resolve(null)
+      }
+      return enterpriseContextPromise
+    }
+    const rememberSpiritTaskOutput = output => {
+      if (output?.source !== 'spirit-api-direct' || output?.status !== 'ok') return
+      const action = String(output.action || '')
+      if (action === 'deleted') {
+        conversationSync.removeTaskFact({ ownerId, sessionId, taskId: output.taskId })
+      } else if (output.taskId) {
+        const changes = output.changes || {}
+        const status = action === 'completed'
+          ? 'DONE'
+          : action === 'started'
+            ? 'IN_PROGRESS'
+            : action === 'status_updated'
+              ? output.targetStatus
+              : changes.status
+        conversationSync.recordTaskFact({
+          ownerId,
+          sessionId,
+          taskId: output.taskId,
+          summary: output.summary,
+          status,
+          assignee: output.assignee?.name || changes.assignee,
+          note: output.completionRemark || output.content,
+        })
+      }
+      const resultRecords = Array.isArray(output.result?.records)
+        ? output.result.records
+        : output.result?.taskId
+          ? [output.result]
+          : []
+      for (const task of resultRecords.slice(0, 12).toReversed()) {
+        const executor = Array.isArray(task.users)
+          ? task.users.find(user => String(user?.userRole || '').toUpperCase() === 'EXECUTOR')
+          : null
+        conversationSync.recordTaskFact({
+          ownerId,
+          sessionId,
+          taskId: task.taskId,
+          summary: task.summary,
+          status: task.status,
+          assignee: executor?.userName,
+          note: task.completionRemark,
+        })
+      }
+      frontend?.updateAgentContext({
+        taskContext: conversationSync.taskContext({ ownerId, sessionId }),
+      })
+    }
     const suppressKnowledgeResponseForTurn = matchedTurnId => {
       if (!matchedTurnId) return
       for (const context of responseContexts.values()) {
@@ -436,6 +492,12 @@ export function attachRealtimeGateway(server, {
         ownerId,
         sessionId,
       }),
+      getTaskContext: () => conversationSync.taskContext({
+        ownerId,
+        sessionId,
+      }),
+      getEnterpriseContext: loadEnterpriseContext,
+      onTaskContextChanged: rememberSpiritTaskOutput,
       onMemoryChanged: () => frontend?.updateAgentContext({
         memories: memoryService?.list(ownerId, { limit: 64 }) || [],
       }),
@@ -1579,21 +1641,27 @@ export function attachRealtimeGateway(server, {
         provider: sessionProvider,
       })
       let createdFrontend
-      createdFrontend = createRealtimeFrontend({
-        providerName: sessionProvider,
-        agentContext: {
-          client: clientContext,
-          textOnly: textOnlySession,
-          toolProfile: config.voiceToolProfile,
-          memories: memoryService?.list(ownerId, { limit: 64 }) || [],
-          recentMessages: conversationSync.frontendContext({ ownerId, sessionId }),
-        },
-        onEvent: handleEvent,
-        onDiagnostic: diagnostic => {
-          const { event, ...fields } = diagnostic
-          connectionLogger.warn(event, fields)
-        },
-        onError: error => {
+      let createdConnectPromise
+      createdConnectPromise = loadEnterpriseContext()
+        .then(enterpriseContext => {
+          if (connectPromise !== createdConnectPromise) return null
+          createdFrontend = createRealtimeFrontend({
+            providerName: sessionProvider,
+            agentContext: {
+              client: clientContext,
+              textOnly: textOnlySession,
+              toolProfile: config.voiceToolProfile,
+              enterpriseContext,
+              memories: memoryService?.list(ownerId, { limit: 64 }) || [],
+              recentMessages: conversationSync.frontendContext({ ownerId, sessionId }),
+              taskContext: conversationSync.taskContext({ ownerId, sessionId }),
+            },
+            onEvent: handleEvent,
+            onDiagnostic: diagnostic => {
+              const { event, ...fields } = diagnostic
+              connectionLogger.warn(event, fields)
+            },
+            onError: error => {
           // Closing a frontend while it is still handshaking is expected when
           // the client enters sleep or reconnects. Its late socket error
           // belongs to the detached frontend and must not mark the live voice
@@ -1617,8 +1685,8 @@ export function attachRealtimeGateway(server, {
           if (classification !== 'inactivity' && classification !== 'capacity_busy') {
             reportFrontendError(error)
           }
-        },
-        onClose: () => {
+            },
+            onClose: () => {
           if (frontend !== createdFrontend) return
           connectionLogger.warn('realtime.closed', {
             provider: createdFrontend.provider.key,
@@ -1650,13 +1718,13 @@ export function attachRealtimeGateway(server, {
               type: 'error',
               message: `实时语音连接恢复失败：${error.message}`,
             }))
-        },
-      })
-      frontend = createdFrontend
-      let createdConnectPromise
-      createdConnectPromise = createdFrontend.connect()
+            },
+          })
+          frontend = createdFrontend
+          return createdFrontend.connect()
+        })
         .then(() => {
-          if (frontend !== createdFrontend) return
+          if (!createdFrontend || frontend !== createdFrontend) return
           realtimeBlockedError = ''
           realtimeConnectedAt = Date.now()
           connectionLogger.info('realtime.connected', {
@@ -1694,7 +1762,7 @@ export function attachRealtimeGateway(server, {
           }
         })
         .catch(error => {
-          if (frontend !== createdFrontend) return
+          if (!createdFrontend || frontend !== createdFrontend) return
           connectionLogger.error('realtime.connect_failed', {
             provider: createdFrontend.provider.key,
             durationMs: Date.now() - connectStartedAt,

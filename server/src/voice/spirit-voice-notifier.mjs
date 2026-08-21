@@ -205,7 +205,7 @@ export class SpiritVoiceNotifier {
     return result
   }
 
-  async notify({ recipientId, recipientName = '', title = '任务提醒', text }) {
+  async notify({ recipientId, recipientName = '', title = '工作通知', text }) {
     if (!this.configured) throw new Error('语音通知接口尚未完整配置')
     const message = optionalText(text)
     if (!recipientId || !message) throw new Error('语音通知缺少接收人或内容')
@@ -224,7 +224,7 @@ export class SpiritVoiceNotifier {
     const audioUrl = await this.uploadAudio(audio)
     const push = await this.sendPush(this.buildPushPayload({
       recipientId,
-      title: optionalText(title) || '任务提醒',
+      title: optionalText(title) || '工作通知',
       text: message,
       audioUrl,
     }))

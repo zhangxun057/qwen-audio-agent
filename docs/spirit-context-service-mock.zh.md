@@ -1,5 +1,48 @@
 # 全双工酒店任务上下文服务 Mock
 
+## 当前实现状态（2026-08-21）
+
+新版 `hotel-direct` 已把接口形态接进真实语音链路：
+
+```text
+可信登录身份 / 本地 Demo 映射
+  -> HotelContextService
+  -> Static Provider（当前）或 HTTP Provider（生产）
+  -> enterprise_context
+  -> Realtime Session 初始 instructions
+```
+
+当前静态数据位于：
+
+```text
+config/hotel-direct/context-mock/hotel-10082-daily.json
+```
+
+本地 Mock 接口可直接验证：
+
+```http
+GET http://127.0.0.1:3101/v1/voice-contexts/hotel-10082-daily?userId=demo-user-hotel-10082
+```
+
+若配置了 `QWEN_AUDIO_CONTEXT_SERVICE_TOKEN`，请求必须携带同值 Bearer Token；未配置时
+仅适用于本机回环地址 Demo。`/api/health` 会展示 mode、version、用户 ID、prompt 字符数、
+是否降级和最近错误，但不会返回 Token。
+
+切换生产 Context Service 时只改配置，不改语音工具或 Realtime 代码：
+
+```dotenv
+QWEN_AUDIO_CONTEXT_MODE=http
+QWEN_AUDIO_CONTEXT_ID=hotel-10082-daily
+QWEN_AUDIO_CONTEXT_USER_ID=demo-user-hotel-10082
+QWEN_AUDIO_CONTEXT_SERVICE_URL=https://context.example.com
+QWEN_AUDIO_CONTEXT_SERVICE_TOKEN=replace-with-service-token
+QWEN_AUDIO_CONTEXT_FALLBACK_TO_MOCK=true
+```
+
+当前 JSON 中的 `prompt` 是从已经验证成功的 `hotel-direct` Demo 迁移而来的占位版本，
+用于验证产品链路；它不是最终每日提示词模板。正式模板由独立上下文服务生成后可直接
+替换响应正文。
+
 ## 1. 目标
 
 全双工模型负责实时听说、理解意图和选择工具；业务系统负责登录身份、任务事实和
@@ -58,7 +101,7 @@ Gateway 是语音网页与千问 Realtime WebSocket 之间的服务端运行层�
 ### 4.1 请求
 
 ```http
-GET /v1/voice-contexts/hotel-10082-daily?userId=2079698_hotel_10082
+GET /v1/voice-contexts/hotel-10082-daily?userId=demo-user-hotel-10082
 Accept: application/json
 Authorization: Bearer <gateway-service-token>
 ```
@@ -78,7 +121,7 @@ Authorization: Bearer <gateway-service-token>
   "generatedAt": "2026-08-21T06:00:00+08:00",
   "expiresAt": "2026-08-22T06:00:00+08:00",
   "subject": {
-    "userId": "2079698_hotel_10082",
+    "userId": "demo-user-hotel-10082",
     "displayName": "张洵",
     "hotelId": "10082"
   },

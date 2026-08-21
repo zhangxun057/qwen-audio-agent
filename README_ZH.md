@@ -126,6 +126,10 @@ npm install -g qwen-audio-agent
 从源码安装、从 GitHub 安装最新代码以及获取 DashScope API Key 的详细步骤见
 [安装指南](docs/getting-started/install.zh.md)。
 
+如果要把当前酒店语音任务 Demo 分享给另一位已经有 Agent 的使用者，请先看
+[可分享版配置说明](docs/getting-started/share.zh.md)。这份说明只使用占位符，
+不会把账号、密码、API Key 或业务 Token 写进仓库；接收方只需在本机配置自己的值。
+
 ## 快速开始
 
 1. 创建配置并填入 API Key：
@@ -163,6 +167,44 @@ qwenaudio tui    # 终端 2：TUI
 [快速开始](docs/getting-started/quickstart.zh.md)、
 [语音前台](docs/voice-frontends/speech-to-speech.zh.md)与
 [TUI 注意](docs/getting-started/tui.zh.md)。
+
+## 酒店语音任务 Demo（`hotel-direct`）
+
+本仓库包含一个面向酒店一线工作的轻量直连示例：全双工语音模型负责实时对话，
+Gateway 直接调用企业任务 API，不要求安装 OpenClaw、DSH 或其他后台 Agent。
+
+```text
+Qwen Audio Realtime
+        │ WebSocket
+        ▼
+Gateway（会话、身份、工具和结果播报）
+        │ HTTP + Bearer Token
+        ▼
+Spirit Task API（查询、创建、更新、开始、完成、记录、删除）
+```
+
+启用方式：
+
+```dotenv
+AGENT_PROTOCOL=none
+QWEN_AUDIO_AGENT_TOOL_PROFILE=hotel-direct
+```
+
+当前 Demo 的关键边界：
+
+- 登录身份由 Host/Context 注入；模型不需要、也不应当口述 `userId`。本地 Mock
+  只使用演示身份，真实部署请把每个 WebSocket 会话绑定到自己的登录主体。
+- 任务 API 的响应先由 Gateway 做字段投影和长度限幅，语音模型只看到标题、描述、状态、
+  时间、创建人、执行人和必要的完成记录等核心字段。
+- 创建和修改任务时，Gateway 确定性解析“几点开始”“几点前完成”等时间表达；已知动作
+  才按标准时长推算，不让模型猜测或把时间塞进描述。
+- 通知是独立结果。只有任务操作和通知都返回成功，语音才会说“已通知”；通知开关关闭时
+  会明确返回跳过原因，不伪报成功。
+- Context Mock 只用于验证 `userId → Context Service → Realtime instructions` 的形状。
+  生产环境应切到 HTTP Context API，并由服务端按可信身份生成每日上下文。
+
+分享或部署这个 Demo 时，请从[可分享版配置说明](docs/getting-started/share.zh.md)开始。
+仓库只放占位符，不包含账号、密码、API Key、Bearer Token 或真实任务 ID。
 
 ## 桌面版
 

@@ -142,7 +142,10 @@ function unwrap(value) {
 }
 
 function compact(value, depth = 0) {
-  if (depth > 4) return '[truncated]'
+  // Bound raw API payloads at the transport boundary. The voice handler then
+  // projects task responses to a stable business shape before model exposure.
+  // Keep task users deep enough for executor names and roles to survive.
+  if (depth > 5) return '[truncated]'
   if (typeof value === 'string') {
     return value.length > MAX_TEXT ? `${value.slice(0, MAX_TEXT)}...` : value
   }

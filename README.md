@@ -175,6 +175,26 @@ platform notes, see [quick start](docs/getting-started/quickstart.md),
 [voice frontends](docs/voice-frontends/speech-to-speech.md), and
 [TUI notes](docs/getting-started/tui.md).
 
+## Hotel voice task demo (`hotel-direct`)
+
+The repository also includes a lightweight direct-integration profile for hotel
+operations. The realtime voice model handles the conversation while the Gateway
+calls the enterprise task API directly; OpenClaw, DSH, and a backend Agent are
+not required for this path.
+
+```text
+Qwen Audio Realtime -> Gateway -> Spirit Task API
+```
+
+Enable it with `AGENT_PROTOCOL=none` and
+`QWEN_AUDIO_AGENT_TOOL_PROFILE=hotel-direct`. The Gateway binds a trusted
+login/context identity to each session, projects and limits task results before
+they reach the voice model, derives explicit schedule fields deterministically,
+and reports notification success separately from task success. The bundled
+Context Mock is only a contract-shaped demo; production deployments should use
+an HTTP Context Service. See the [shareable setup guide](docs/getting-started/share.zh.md).
+Never commit account credentials, API keys, bearer tokens, or real task IDs.
+
 ## Desktop App
 
 The desktop app provides a floating voice orb that stays on your desktop,

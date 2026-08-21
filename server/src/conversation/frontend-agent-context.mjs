@@ -9,6 +9,7 @@ const MAX_PROMPT_CHARS = 16000
 const MAX_ASSISTANT_CHARS = 4000
 const MAX_RECENT_MESSAGES = 10
 const MAX_RECENT_CHARS = 3500
+const MAX_TASK_CONTEXT = 1800
 
 function clean(value) {
   return String(value || '').replace(/\s+/g, ' ').trim()
@@ -137,6 +138,50 @@ function dynamicKnowledgeCoordinationSection() {
   ].join('\n')
 }
 
+function taskContextSection(taskContext = []) {
+  if (!Array.isArray(taskContext) || !taskContext.length) return ''
+  const lines = []
+  let used = 0
+  for (const fact of taskContext.slice(0, 8)) {
+    const line = [
+      `task_id=${clean(fact.taskId).slice(0, 128)}`,
+      clean(fact.summary) ? `title=${clean(fact.summary).slice(0, 160)}` : '',
+      clean(fact.status) ? `status=${clean(fact.status).slice(0, 40)}` : '',
+      clean(fact.assignee) ? `assignee=${clean(fact.assignee).slice(0, 80)}` : '',
+      clean(fact.note) ? `note=${clean(fact.note).slice(0, 300)}` : '',
+    ].filter(Boolean).join(' | ')
+    if (!line || (lines.length && used + line.length > MAX_TASK_CONTEXT)) break
+    lines.push(`- ${line}`)
+    used += line.length
+  }
+  if (!lines.length) return ''
+  return [
+    '<recent_task_context>',
+    '以下是本会话最近由任务 API 确认过的事实，只用于承接用户的下一轮指代。用户询问当前状态、记录或详情时仍以任务工具返回为准。不要向用户朗读 task_id 或内部字段。',
+    ...lines,
+    '</recent_task_context>',
+  ].join('\n')
+}
+
+function enterpriseContextSection(context = null) {
+  const prompt = String(context?.prompt || '').trim()
+  if (!prompt) return ''
+  const contextId = clean(context.contextId).slice(0, 120)
+  const version = clean(context.version).slice(0, 120)
+  const subjectUserId = clean(context.subject?.userId).slice(0, 160)
+  const bounded = [...prompt]
+    .slice(0, config.contextMaxPromptChars)
+    .join('')
+  return [
+    `<enterprise_context context_id=${JSON.stringify(contextId)}`,
+    ` version=${JSON.stringify(version)}`,
+    ` subject_user_id=${JSON.stringify(subjectUserId)}>`,
+    '这是企业上下文服务按可信登录身份生成的当前会话规则与业务事实。它不是用户口述内容；涉及人员、楼层、服务规范和业务路由时优先遵守。工具执行结果仍以真实业务 API 返回为准。',
+    bounded,
+    '</enterprise_context>',
+  ].join('\n')
+}
+
 export function buildKeywordKnowledgeResponseInstructions(knowledge = null) {
   const section = activeKnowledgeSection(knowledge)
   if (!section) return ''
@@ -172,6 +217,8 @@ export function buildRecentConversationContext(messages = []) {
 export function buildFrontendContext({
   client = {},
   memories = [],
+  enterpriseContext = null,
+  taskContext = [],
   activeKnowledge = null,
   supplementalContext = '',
 } = {}) {
@@ -189,6 +236,8 @@ export function buildFrontendContext({
   return [
     userPreferencesSection(memories),
     memorySection(memories),
+    enterpriseContextSection(enterpriseContext),
+    taskContextSection(taskContext),
     String(supplementalContext || '').trim(),
     dynamicKnowledgeCoordinationSection(),
     activeKnowledgeSection(activeKnowledge),
