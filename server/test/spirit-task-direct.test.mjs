@@ -86,6 +86,67 @@ test('writes Spirit tasks and checks notification gates through the same service
   assert.equal(calls[2].init.method, 'POST')
 })
 
+test('preserves the source plugin contracts for task lifecycle and execution records', async () => {
+  const calls = []
+  const client = new SpiritTaskDirectClient({
+    baseUrl: 'https://spirit.example.test/hotelAi/dify/hotel/v2',
+    bearerToken: 'service-token',
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init })
+      return jsonResponse({ success: true, data: null })
+    },
+  })
+
+  await client.start('task-1')
+  await client.complete('task-1', '房间检查完成')
+  await client.updateStatus('task-1', 'PENDING_APPROVAL')
+  await client.updatePlanTime('task-1', {
+    acceptTime: '2026-08-21 09:00:00',
+    executeTime: null,
+    completeTime: '2026-08-21 10:00:00',
+  })
+  await client.updateDailySummary('task-1', '今日处理记录', true)
+  await client.workload('user-1,user-2', 'ALL')
+  await client.addComment('task-1', '现场发现灯具损坏', 'USER_DIALOGUE')
+  await client.detailByConversation('conversation-1')
+
+  assert.deepEqual(
+    calls.map(call => [
+      new URL(call.url).pathname,
+      call.init.method,
+      call.init.body ? JSON.parse(call.init.body) : undefined,
+    ]),
+    [
+      ['/hotelAi/dify/hotel/v2/task/start', 'POST', { taskId: 'task-1' }],
+      ['/hotelAi/dify/hotel/v2/task/complete', 'POST', {
+        taskId: 'task-1', completionRemark: '房间检查完成',
+      }],
+      ['/hotelAi/dify/hotel/v2/task/ai-update-status', 'POST', {
+        taskId: 'task-1', targetStatus: 'PENDING_APPROVAL',
+      }],
+      ['/hotelAi/dify/hotel/v2/task/plan-time', 'POST', {
+        taskId: 'task-1',
+        planTime: {
+          acceptTime: '2026-08-21 09:00:00',
+          executeTime: null,
+          completeTime: '2026-08-21 10:00:00',
+        },
+      }],
+      ['/hotelAi/dify/hotel/v2/task/daily-summary', 'POST', {
+        taskId: 'task-1', content: '今日处理记录', fullReplace: true,
+      }],
+      ['/hotelAi/dify/hotel/v2/task/today-workload', 'POST', {
+        userIds: 'user-1,user-2', queryType: 'ALL',
+      }],
+      ['/hotelAi/dify/hotel/v2/task/execution-record', 'POST', {
+        taskId: 'task-1', recordSource: 'USER_DIALOGUE', content: '现场发现灯具损坏',
+      }],
+      ['/hotelAi/dify/hotel/v2/task/detailByConversationId', 'GET', undefined],
+    ],
+  )
+  assert.equal(new URL(calls.at(-1).url).searchParams.get('conversationId'), 'conversation-1')
+})
+
 test('can skip the on-duty request while retaining the notification switch gate', async () => {
   const calls = []
   const client = new SpiritTaskDirectClient({
@@ -141,4 +202,24 @@ test('fails clearly when the direct service bearer token is absent', async () =>
   })
 
   await assert.rejects(client.list(), /SPIRIT_BEARER_TOKEN/)
+})
+
+test('validates source limits and enums before sending a request', async () => {
+  let requests = 0
+  const client = new SpiritTaskDirectClient({
+    baseUrl: 'https://spirit.example.test/hotelAi/dify/hotel/v2',
+    bearerToken: 'service-token',
+    fetchImpl: async () => {
+      requests += 1
+      return jsonResponse({ success: true, data: null })
+    },
+  })
+
+  assert.throws(() => client.list({ requestNum: 101 }), /每页数量/)
+  assert.throws(() => client.list({ taskView: 'RECENT' }), /任务视图/)
+  assert.throws(() => client.list({ executeTimeFrom: '2026-08-21' }), /yyyy-MM-dd/)
+  assert.throws(() => client.create({ summary: '', users: {} }), /任务标题/)
+  assert.throws(() => client.updateStatus('task-1', 'CANCELLED'), /目标状态/)
+  assert.throws(() => client.addComment('task-1', 'x'.repeat(4_001)), /4000/)
+  assert.equal(requests, 0)
 })

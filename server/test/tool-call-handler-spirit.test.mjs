@@ -55,6 +55,25 @@ test('creates a normalized floor-routed task and notifies the selected executor'
   assert.equal(outputs[0][1].notification.status, 'sent')
 })
 
+test('caps voice task queries at twenty records while the source client stays general', async () => {
+  let query
+  const { handler, outputs } = harness({
+    client: {
+      list: async args => {
+        query = args
+        return { total: 0, records: [] }
+      },
+    },
+  })
+
+  await handler.handleSpiritTask('call-list', 'turn-1', 'spirit_task_list', {
+    requestNum: 100,
+  })
+
+  assert.equal(query.requestNum, 20)
+  assert.equal(outputs[0][1].status, 'ok')
+})
+
 test('creates an isolated self-test task without notifying staff', async () => {
   let payload
   let notified = false
@@ -127,6 +146,72 @@ test('updates a task with a deterministic assignee mapping', async () => {
   assert.equal(payload.status, 'DONE')
   assert.equal(payload.executors[0].userId, '2079529_hotel_10082')
   assert.equal(outputs[0][1].action, 'updated')
+})
+
+test('starts and completes tasks through the dedicated lifecycle endpoints', async () => {
+  const calls = []
+  const { handler, outputs } = harness({
+    client: {
+      start: async taskId => calls.push(['start', taskId]),
+      complete: async (taskId, remark) => calls.push(['complete', taskId, remark]),
+    },
+  })
+
+  await handler.startSpiritTask('call-start', 'turn-1', { taskId: 'task-1' })
+  await handler.completeSpiritTask('call-complete', 'turn-1', {
+    taskId: 'task-1',
+    completionRemark: '房间检查完成',
+  })
+
+  assert.deepEqual(calls, [
+    ['start', 'task-1'],
+    ['complete', 'task-1', '房间检查完成'],
+  ])
+  assert.equal(outputs[0][1].action, 'started')
+  assert.equal(outputs[1][1].action, 'completed')
+})
+
+test('updates a supported status and rejects invented status values', async () => {
+  const calls = []
+  const { handler, outputs } = harness({
+    client: {
+      updateStatus: async (taskId, status) => calls.push([taskId, status]),
+    },
+  })
+
+  await handler.updateSpiritTaskStatus('call-status', 'turn-1', {
+    taskId: 'task-1',
+    targetStatus: 'EXCEPTION',
+  })
+  await handler.updateSpiritTaskStatus('call-invalid-status', 'turn-1', {
+    taskId: 'task-1',
+    targetStatus: 'CANCELLED',
+  })
+
+  assert.deepEqual(calls, [['task-1', 'EXCEPTION']])
+  assert.equal(outputs[0][1].action, 'status_updated')
+  assert.equal(outputs[1][1].error_code, 'task_status_update_failed')
+})
+
+test('adds a bounded execution record without inventing operator identity', async () => {
+  let received
+  const { handler, outputs } = harness({
+    client: {
+      addComment: async (...args) => {
+        received = args
+        return null
+      },
+    },
+  })
+
+  await handler.addSpiritTaskComment('call-comment', 'turn-1', {
+    taskId: 'task-1',
+    content: '查房发现电视无法开机',
+    recordSource: 'USER_DIALOGUE',
+  })
+
+  assert.deepEqual(received, ['task-1', '查房发现电视无法开机', 'USER_DIALOGUE'])
+  assert.equal(outputs[0][1].action, 'comment_added')
 })
 
 test('rejects deletion unless the current user turn explicitly says delete', async () => {

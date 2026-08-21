@@ -13,6 +13,10 @@ import {
   SPIRIT_TASK_COMMENTS_TOOL_NAME,
   SPIRIT_TASK_CREATE_TOOL_NAME,
   SPIRIT_TASK_UPDATE_TOOL_NAME,
+  SPIRIT_TASK_START_TOOL_NAME,
+  SPIRIT_TASK_COMPLETE_TOOL_NAME,
+  SPIRIT_TASK_UPDATE_STATUS_TOOL_NAME,
+  SPIRIT_TASK_ADD_COMMENT_TOOL_NAME,
   SPIRIT_TASK_DELETE_TOOL_NAME,
   SPIRIT_VOICE_NOTIFY_TOOL_NAME,
 } from '../realtime-provider.mjs'
@@ -25,6 +29,10 @@ import {
   SPIRIT_DEMO_CHANNEL,
   SPIRIT_DEMO_CREATOR,
 } from '../spirit-task-directory.mjs'
+import {
+  SPIRIT_TASK_RECORD_SOURCES,
+  SPIRIT_TASK_STATUSES,
+} from '../spirit-task-direct.mjs'
 
 const SENSITIVE_MEMORY = /(?:pass(?:word)?|secret|api[_ -]?key|access[_ -]?token|credential|验证码|密码|密钥|令牌|\bsk-[a-z0-9_-]+)/i
 
@@ -424,6 +432,22 @@ export class ToolCallHandler {
       await this.updateSpiritTask(callId, turnId, args)
       return
     }
+    if (toolName === SPIRIT_TASK_START_TOOL_NAME) {
+      await this.startSpiritTask(callId, turnId, args)
+      return
+    }
+    if (toolName === SPIRIT_TASK_COMPLETE_TOOL_NAME) {
+      await this.completeSpiritTask(callId, turnId, args)
+      return
+    }
+    if (toolName === SPIRIT_TASK_UPDATE_STATUS_TOOL_NAME) {
+      await this.updateSpiritTaskStatus(callId, turnId, args)
+      return
+    }
+    if (toolName === SPIRIT_TASK_ADD_COMMENT_TOOL_NAME) {
+      await this.addSpiritTaskComment(callId, turnId, args)
+      return
+    }
     if (toolName === SPIRIT_TASK_DELETE_TOOL_NAME) {
       await this.deleteSpiritTask(callId, turnId, args)
       return
@@ -658,7 +682,10 @@ export class ToolCallHandler {
     }
     try {
       const result = toolName === SPIRIT_TASK_LIST_TOOL_NAME
-        ? await this.spiritTaskClient.list(args)
+        ? await this.spiritTaskClient.list({
+            ...args,
+            requestNum: Math.min(20, Number(args.requestNum) || 20),
+          })
         : toolName === SPIRIT_TASK_DETAIL_TOOL_NAME
           ? await this.spiritTaskClient.detail(taskId)
           : await this.spiritTaskClient.comments(taskId)
@@ -855,6 +882,165 @@ export class ToolCallHandler {
     } catch (error) {
       await this.sendOutput(callId, failure(
         'task_update_failed',
+        String(error?.message || error),
+        { retryable: true },
+      ), turnId)
+    }
+  }
+
+  async startSpiritTask(callId, turnId, args) {
+    if (!this.spiritTaskClient) {
+      await this.sendOutput(callId, failure(
+        'task_tool_unavailable',
+        '当前没有连接到 Spirit 任务 API。',
+        { retryable: true },
+      ), turnId)
+      return
+    }
+    try {
+      const taskId = String(args.taskId || '').trim()
+      if (!taskId) throw new Error('开始任务需要真实 taskId')
+      const result = await this.spiritTaskClient.start(taskId)
+      await this.sendOutput(callId, {
+        status: 'ok',
+        source: 'spirit-api-direct',
+        action: 'started',
+        taskId,
+        result,
+      }, turnId, null, {
+        response: {
+          instructions: '只说任务已经开始或已接手；不要开场，不要朗读 taskId、接口名或内部字段。',
+        },
+      })
+    } catch (error) {
+      await this.sendOutput(callId, failure(
+        'task_start_failed',
+        String(error?.message || error),
+        { retryable: true },
+      ), turnId)
+    }
+  }
+
+  async completeSpiritTask(callId, turnId, args) {
+    if (!this.spiritTaskClient) {
+      await this.sendOutput(callId, failure(
+        'task_tool_unavailable',
+        '当前没有连接到 Spirit 任务 API。',
+        { retryable: true },
+      ), turnId)
+      return
+    }
+    try {
+      const taskId = String(args.taskId || '').trim()
+      if (!taskId) throw new Error('完成任务需要真实 taskId')
+      const completionRemark = args.completionRemark === undefined
+        ? undefined
+        : String(args.completionRemark || '').trim() || undefined
+      if (completionRemark && completionRemark.length > 4_000) {
+        throw new Error('完成备注不能超过 4000 个字符')
+      }
+      const result = await this.spiritTaskClient.complete(taskId, completionRemark)
+      await this.sendOutput(callId, {
+        status: 'ok',
+        source: 'spirit-api-direct',
+        action: 'completed',
+        taskId,
+        completionRemark,
+        result,
+      }, turnId, null, {
+        response: {
+          instructions: '直接说任务已完成；有完成说明时用一句自然短句带上，不要朗读 taskId、接口名或内部字段。',
+        },
+      })
+    } catch (error) {
+      await this.sendOutput(callId, failure(
+        'task_complete_failed',
+        String(error?.message || error),
+        { retryable: true },
+      ), turnId)
+    }
+  }
+
+  async updateSpiritTaskStatus(callId, turnId, args) {
+    if (!this.spiritTaskClient) {
+      await this.sendOutput(callId, failure(
+        'task_tool_unavailable',
+        '当前没有连接到 Spirit 任务 API。',
+        { retryable: true },
+      ), turnId)
+      return
+    }
+    try {
+      const taskId = String(args.taskId || '').trim()
+      const targetStatus = String(args.targetStatus || '').trim()
+      if (!taskId) throw new Error('修改任务状态需要真实 taskId')
+      if (!SPIRIT_TASK_STATUSES.includes(targetStatus)) {
+        throw new Error('目标状态不是 Spirit 支持的原始状态')
+      }
+      const result = await this.spiritTaskClient.updateStatus(taskId, targetStatus)
+      await this.sendOutput(callId, {
+        status: 'ok',
+        source: 'spirit-api-direct',
+        action: 'status_updated',
+        taskId,
+        targetStatus,
+        result,
+      }, turnId, null, {
+        response: {
+          instructions: '只用自然中文说明任务的新状态；不要朗读英文状态、taskId、接口名或内部字段。',
+        },
+      })
+    } catch (error) {
+      await this.sendOutput(callId, failure(
+        'task_status_update_failed',
+        String(error?.message || error),
+        { retryable: true },
+      ), turnId)
+    }
+  }
+
+  async addSpiritTaskComment(callId, turnId, args) {
+    if (!this.spiritTaskClient) {
+      await this.sendOutput(callId, failure(
+        'task_tool_unavailable',
+        '当前没有连接到 Spirit 任务 API。',
+        { retryable: true },
+      ), turnId)
+      return
+    }
+    try {
+      const taskId = String(args.taskId || '').trim()
+      const content = String(args.content || '').trim()
+      const recordSource = String(args.recordSource || 'SYSTEM_AUTO').trim()
+      if (!taskId) throw new Error('追加任务记录需要真实 taskId')
+      if (!content) throw new Error('任务记录内容不能为空')
+      if (content.length > 4_000) throw new Error('任务记录不能超过 4000 个字符')
+      if (!SPIRIT_TASK_RECORD_SOURCES.includes(recordSource)) {
+        throw new Error('任务记录来源不受支持')
+      }
+      // The direct service token owns attribution until the product login
+      // adapter can provide the authenticated user's real identity.
+      const result = await this.spiritTaskClient.addComment(
+        taskId,
+        content,
+        recordSource,
+      )
+      await this.sendOutput(callId, {
+        status: 'ok',
+        source: 'spirit-api-direct',
+        action: 'comment_added',
+        taskId,
+        recordSource,
+        content,
+        result,
+      }, turnId, null, {
+        response: {
+          instructions: '直接说记录已补充，并用最短自然句概括内容；不要说“评论”、资料来源、taskId、接口名或内部字段。',
+        },
+      })
+    } catch (error) {
+      await this.sendOutput(callId, failure(
+        'task_comment_failed',
         String(error?.message || error),
         { retryable: true },
       ), turnId)

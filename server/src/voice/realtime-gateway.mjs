@@ -1584,6 +1584,7 @@ export function attachRealtimeGateway(server, {
         agentContext: {
           client: clientContext,
           textOnly: textOnlySession,
+          toolProfile: config.voiceToolProfile,
           memories: memoryService?.list(ownerId, { limit: 64 }) || [],
           recentMessages: conversationSync.frontendContext({ ownerId, sessionId }),
         },
@@ -2272,7 +2273,7 @@ export function attachRealtimeGateway(server, {
           baseUrl: spiritTaskClient.baseUrl,
           taskApiConfigured: spiritTaskClient.configured,
           voiceNotifierConfigured: spiritVoiceNotifier.configured,
-          tools: frontendTools()
+          tools: frontendTools({ toolProfile: config.voiceToolProfile })
             .map(tool => tool?.function?.name)
             .filter(name => String(name || '').startsWith('spirit_')),
         },

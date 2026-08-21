@@ -5,6 +5,7 @@ import {
 } from '../conversation/frontend-agent-context.mjs'
 import { MEMORY_DOCUMENTS } from '../core/memory-scopes.mjs'
 import { buildSpiritTaskDispatchContext } from './spirit-task-directory.mjs'
+import { SPIRIT_TASK_STATUSES } from './spirit-task-direct.mjs'
 
 export const SPAWN_THINKING_TOOL_NAME = 'spawn_thinking'
 export const SCHEDULE_REMINDER_TOOL_NAME = 'schedule_reminder'
@@ -21,8 +22,14 @@ export const SPIRIT_TASK_DETAIL_TOOL_NAME = 'spirit_task_detail'
 export const SPIRIT_TASK_COMMENTS_TOOL_NAME = 'spirit_task_comments'
 export const SPIRIT_TASK_CREATE_TOOL_NAME = 'spirit_task_create'
 export const SPIRIT_TASK_UPDATE_TOOL_NAME = 'spirit_task_update'
+export const SPIRIT_TASK_START_TOOL_NAME = 'spirit_task_start'
+export const SPIRIT_TASK_COMPLETE_TOOL_NAME = 'spirit_task_complete'
+export const SPIRIT_TASK_UPDATE_STATUS_TOOL_NAME = 'spirit_task_update_status'
+export const SPIRIT_TASK_ADD_COMMENT_TOOL_NAME = 'spirit_task_add_comment'
 export const SPIRIT_TASK_DELETE_TOOL_NAME = 'spirit_task_delete'
 export const SPIRIT_VOICE_NOTIFY_TOOL_NAME = 'spirit_voice_notify'
+export const STANDARD_TOOL_PROFILE = 'standard'
+export const HOTEL_DIRECT_TOOL_PROFILE = 'hotel-direct'
 
 const delegateTool = {
   type: 'function',
@@ -277,13 +284,89 @@ const spiritTaskUpdateTool = {
       type: 'object',
       properties: {
         taskId: { type: 'string', description: '真实 Spirit 任务 ID。' },
-        status: { type: 'string', enum: ['PENDING_RECEIPT', 'TODO', 'IN_PROGRESS', 'PENDING_APPROVAL', 'DONE', 'EXCEPTION'], description: '新任务状态。' },
+        status: { type: 'string', enum: [...SPIRIT_TASK_STATUSES], description: '新任务状态。' },
         description: { type: 'string', description: '替换后的任务描述。' },
         assigneeName: { type: 'string', description: '重新分配的执行人姓名。' },
         roomNumber: { type: 'string', description: '用于按楼层重新匹配执行人的房号。' },
         floor: { type: 'integer', description: '用于重新匹配执行人的楼层。' },
       },
       required: ['taskId'],
+      additionalProperties: false,
+    },
+  },
+}
+
+const spiritTaskStartTool = {
+  type: 'function',
+  function: {
+    name: SPIRIT_TASK_START_TOOL_NAME,
+    description: '启动一个已知的 Spirit 业务任务。用户明确表示开始、接手或着手执行任务时调用；必须使用查询结果中的真实 taskId。',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: '真实 Spirit 任务 ID。' },
+      },
+      required: ['taskId'],
+      additionalProperties: false,
+    },
+  },
+}
+
+const spiritTaskCompleteTool = {
+  type: 'function',
+  function: {
+    name: SPIRIT_TASK_COMPLETE_TOOL_NAME,
+    description: '完成一个已知的 Spirit 业务任务，可附带完成备注。只有用户明确表达任务已经完成时调用；现场发现但尚未完成时应使用 spirit_task_add_comment。',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: '真实 Spirit 任务 ID。' },
+        completionRemark: { type: 'string', description: '用户提供的完成说明；没有可省略。' },
+      },
+      required: ['taskId'],
+      additionalProperties: false,
+    },
+  },
+}
+
+const spiritTaskUpdateStatusTool = {
+  type: 'function',
+  function: {
+    name: SPIRIT_TASK_UPDATE_STATUS_TOOL_NAME,
+    description: '通过 Spirit 专用状态接口修改任务状态。用于异常、待审批等明确状态流转；开始任务优先使用 spirit_task_start，完成任务优先使用 spirit_task_complete。',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: '真实 Spirit 任务 ID。' },
+        targetStatus: {
+          type: 'string',
+          enum: [...SPIRIT_TASK_STATUSES],
+          description: 'Spirit 原始目标状态。',
+        },
+      },
+      required: ['taskId', 'targetStatus'],
+      additionalProperties: false,
+    },
+  },
+}
+
+const spiritTaskAddCommentTool = {
+  type: 'function',
+  function: {
+    name: SPIRIT_TASK_ADD_COMMENT_TOOL_NAME,
+    description: '向任务追加执行记录或评论，不覆盖原任务标题和描述。用户汇报查房结果、现场异常、处理进展或补充信息时调用。代用户记录原话时使用 USER_DIALOGUE。',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: '真实 Spirit 任务 ID。' },
+        content: { type: 'string', description: '需要追加的执行记录，最多 4000 字符。' },
+        recordSource: {
+          type: 'string',
+          enum: ['SYSTEM_AUTO', 'USER_DIALOGUE'],
+          description: '记录来源；直接记录用户现场汇报时使用 USER_DIALOGUE，默认 SYSTEM_AUTO。',
+        },
+      },
+      required: ['taskId', 'content'],
       additionalProperties: false,
     },
   },
@@ -373,6 +456,26 @@ export const TOOLS = [
   spiritTaskCommentsTool,
   spiritTaskCreateTool,
   spiritTaskUpdateTool,
+  spiritTaskStartTool,
+  spiritTaskCompleteTool,
+  spiritTaskUpdateStatusTool,
+  spiritTaskAddCommentTool,
+  spiritTaskDeleteTool,
+  spiritVoiceNotifyTool,
+]
+
+export const HOTEL_DIRECT_TOOLS = [
+  getCurrentTimeTool,
+  memoryTool,
+  spiritTaskListTool,
+  spiritTaskDetailTool,
+  spiritTaskCommentsTool,
+  spiritTaskCreateTool,
+  spiritTaskUpdateTool,
+  spiritTaskStartTool,
+  spiritTaskCompleteTool,
+  spiritTaskUpdateStatusTool,
+  spiritTaskAddCommentTool,
   spiritTaskDeleteTool,
   spiritVoiceNotifyTool,
 ]
@@ -381,9 +484,15 @@ export function frontendTools(agentContext = {}) {
   const states = Array.isArray(agentContext.client?.states)
     ? agentContext.client.states
     : []
-  return states.includes('sleeping')
-    ? [...TOOLS, enterSleepTool]
+  const profile = String(
+    agentContext.toolProfile || STANDARD_TOOL_PROFILE,
+  ).trim().toLowerCase()
+  const tools = profile === HOTEL_DIRECT_TOOL_PROFILE
+    ? HOTEL_DIRECT_TOOLS
     : TOOLS
+  return states.includes('sleeping')
+    ? [...tools, enterSleepTool]
+    : tools
 }
 
 export const resultResponseInstructions = [

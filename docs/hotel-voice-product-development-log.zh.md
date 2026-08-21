@@ -232,13 +232,13 @@ PRODUCT_EXTENSION 为酒店语音产品新增的扩展能力
 | `spirit_task_comments` | `GET /task/execution-record/list` | 已接通 | 忠实移植；模型侧保留，用于读取执行记录。 |
 | `spirit_task_create` | `POST /task` | 已接但 Demo 化 | 重建忠实 API 适配；模型侧保留派活入口。 |
 | `spirit_task_update` | `POST /task/update` | 已简化接通 | 恢复完整更新语义；模型侧用于改描述和转派。 |
-| `spirit_task_start` | `POST /task/start` | 未接 | 第一优先级补入；执行者开始任务。 |
-| `spirit_task_complete` | `POST /task/complete` | 未接 | 第一优先级补入；支持完成备注。 |
-| `spirit_task_update_status` | `POST /task/ai-update-status` | 未接 | 第一优先级补入；保留专用状态流转。 |
-| `spirit_task_add_comment` | `POST /task/execution-record` | 未接 | 第一优先级补入；写现场情况和执行记录。 |
-| `spirit_task_workload` | `POST /task/today-workload` | 未接 | 底层忠实移植；目标首版暂不注册，负载派活阶段再启用。 |
-| `spirit_task_update_plan_time` | `POST /task/plan-time` | 未接 | 底层可保留；目标首版不注册。 |
-| `spirit_task_update_daily_summary` | `POST /task/daily-summary` | 未接 | 底层可保留；履职总结交给其他后台 Agent，首版不注册。 |
+| `spirit_task_start` | `POST /task/start` | 已接并有契约测试 | 模型侧注册；执行者开始任务。 |
+| `spirit_task_complete` | `POST /task/complete` | 已接并有契约测试 | 模型侧注册；支持完成备注。 |
+| `spirit_task_update_status` | `POST /task/ai-update-status` | 已接并有契约测试 | 模型侧注册；保留专用状态流转。 |
+| `spirit_task_add_comment` | `POST /task/execution-record` | 已接并有契约测试 | 模型侧注册；写现场情况和执行记录。正式登录前不伪造操作者身份。 |
+| `spirit_task_workload` | `POST /task/today-workload` | 底层已接 | 目标首版暂不注册，负载派活阶段再启用。 |
+| `spirit_task_update_plan_time` | `POST /task/plan-time` | 底层已接 | 目标首版不注册。 |
+| `spirit_task_update_daily_summary` | `POST /task/daily-summary` | 底层已接 | 履职总结交给其他后台 Agent，首版不注册。 |
 | `spirit_task_delete` | `POST /task/{taskId}` | 已接通 | 忠实移植；模型侧保留，并增加当前轮明确确认保护。 |
 
 源头 `create` 中的 `users`、`subTasks`、`originalRequest`、`recommendedActions` 等字段不能从
@@ -312,26 +312,23 @@ spirit_task_update_daily_summary
 
 ## 4. 当前技术债
 
-1. Spirit 当前直连实现只覆盖部分 API，并简化了源头校验。
+1. Spirit 当前直连实现已覆盖目标源头 API 路径，但创建参数的全量源头校验尚未完成。
 2. 创建人、人员、楼层、渠道和测试账号仍存在 Demo 写死逻辑。
 3. `spirit_task_create` 当前混合了创建任务和通知员工两个结果。
 4. 当前工具定义把产品扩展通知命名在 `spirit_*` 命名空间中，来源不够清晰。
 5. 企业上下文仍通过本地补充文本注入，尚未接真实上下文服务。
-6. 工具和上下文仍未按 `hotel-direct` 产品档案动态注册。
+6. 工具已按 `hotel-direct` 产品档案动态注册；企业上下文服务仍未接入。
 7. 尚未完整落库 Realtime Usage，成本判断缺乏真实会话证据。
 8. 用户提到的 Python Skill 原文件尚未定位，无法完成逐行逻辑一致性审计。
 
 ## 5. 下一阶段执行顺序
 
-1. 建立源头工具契约测试，逐项覆盖 `task-api.ts` / `task-tools.ts`。
-2. 重构 Spirit API 适配层，消除当前实验简化，但保持现有 Demo 可回归。
-3. 补齐 `start`、`complete`、`update_status` 和 `add_comment`。
-4. 建立 `hotel-direct` 工具注册档案，关闭后台 Agent、定时任务和 notes 工具。
-5. 将固定人员、身份和派发规则迁出工具代码，接上下文 Mock API。
-6. 规范 `notify_staff`，完成任务结果与通知结果的独立审计和幂等。
-7. 增加 Usage、延迟、工具成功率和重连日志。
-8. 固定客户端 WebSocket 协议，抽取客户端 SDK。
-9. 完成 Windows 安装包、配置向导、健康检查和干净环境验收。
+1. 补齐创建、更新、列表参数的源头校验和边界契约测试。
+2. 将固定人员、身份和派发规则迁出工具代码，接上下文 Mock API。
+3. 规范 `notify_staff`，完成任务结果与通知结果的独立审计和幂等。
+4. 增加 Usage、延迟、工具成功率和重连日志。
+5. 固定客户端 WebSocket 协议，抽取客户端 SDK。
+6. 完成 Windows 安装包、配置向导、健康检查和干净环境验收。
 
 ## 6. 决策记录
 
@@ -344,4 +341,6 @@ spirit_task_update_daily_summary
 - 不强制将 Spirit 工具压缩为四个；先完成源头适配和真实语音测试。
 - `spirit_voice_notify` 是员工 App 工作通知能力，不是当前用户回复 TTS。
 - 成本需要观测，但不以破坏自然全双工体验的方式优先优化。
-
+- 已冻结成功保底版本：分支 `backup/voice-demo-success-20260821`，标签
+  `voice-demo-success-20260821`，提交 `283c521`。
+- 新版在 `feature/hotel-voice-v2` 开发，启用 `hotel-direct` 工具档案。

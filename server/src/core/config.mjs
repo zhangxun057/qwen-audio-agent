@@ -163,6 +163,9 @@ export const config = {
     ? 0
     : numberSetting(process.env.PORT, 3101, { min: 1, max: 65535 }),
   audioProvider: realtimeFrontend.provider,
+  voiceToolProfile: String(
+    process.env.QWEN_AUDIO_AGENT_TOOL_PROFILE || 'standard',
+  ).trim().toLowerCase(),
   realtimeConfigSignature: realtimeFrontend.signature,
   dashscopeApiKey: realtimeFrontend.dashscopeApiKey,
   audioRealtimeBaseUrl: realtimeFrontend.dashscopeRealtimeUrl,
