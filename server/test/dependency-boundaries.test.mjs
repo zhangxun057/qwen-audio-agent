@@ -8,7 +8,8 @@ const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../src')
 const projectRoot = resolve(sourceRoot, '../..')
 const sharedRoot = resolve(sourceRoot, '../../shared')
 const allowedDependencies = {
-  app: new Set(['agent', 'app', 'conversation', 'core', 'task', 'voice']),
+  app: new Set(['agent', 'app', 'context', 'conversation', 'core', 'task', 'voice']),
+  context: new Set(['context', 'core', 'shared']),
   process: new Set(['process', 'shared']),
   core: new Set(['core', 'shared']),
   agent: new Set(['agent', 'core', 'shared']),

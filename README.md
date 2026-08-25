@@ -162,21 +162,25 @@ platform notes, see [quick start](docs/getting-started/quickstart.md),
 [voice frontends](docs/voice-frontends/speech-to-speech.md), and
 [TUI notes](docs/getting-started/tui.md).
 
-## Examples
+## Hotel voice task demo (`hotel-direct`)
 
-This repository includes a smart cockpit voice Agent example with vehicle
-control, navigation, music, weather, web search, flash-buy workflows, and a
-car UI:
+The repository also includes a lightweight direct-integration profile for hotel
+operations. The realtime voice model handles the conversation while the Gateway
+calls the enterprise task API directly; OpenClaw, DSH, and a backend Agent are
+not required for this path.
 
-```bash
-cp examples/car/.env.example examples/car/.env.local
-npm install --prefix examples/car/server
-npm install --prefix examples/car/react-app
-npm run example:car:server   # Terminal 1: car Agent server
-npm run example:car:web      # Terminal 2: car UI
+```text
+Qwen Audio Realtime -> Gateway -> Spirit Task API
 ```
 
-See [examples/car](https://github.com/QwenAudio/qwen-audio-agent/tree/main/examples/car) for details.
+Enable it with `AGENT_PROTOCOL=none` and
+`QWEN_AUDIO_AGENT_TOOL_PROFILE=hotel-direct`. The Gateway binds a trusted
+login/context identity to each session, projects and limits task results before
+they reach the voice model, derives explicit schedule fields deterministically,
+and reports notification success separately from task success. The bundled
+Context Mock is only a contract-shaped demo; production deployments should use
+an HTTP Context Service. See the [shareable setup guide](docs/getting-started/share.zh.md).
+Never commit account credentials, API keys, bearer tokens, or real task IDs.
 
 ## Desktop App
 
