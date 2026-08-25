@@ -1,6 +1,6 @@
 import express from 'express'
 import { createServer } from 'http'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { resolve } from 'path'
 import { agent as defaultAgent } from '../agent/agent-client.mjs'
 import { BackendAvailability } from '../agent/backend-availability.mjs'
@@ -37,6 +37,17 @@ import {
 import { ReminderScheduler } from '../task/reminder-scheduler.mjs'
 import { webDistributionPath } from '../core/install-paths.mjs'
 import { installOfflineNotifications } from './offline-notifications.mjs'
+import { createHotelContextServiceFromConfig } from '../context/hotel-context-service.mjs'
+
+function acceptsContextServiceToken(header, expectedToken) {
+  if (!expectedToken) return true
+  const supplied = String(header || '').replace(/^Bearer\s+/i, '')
+  const expected = String(expectedToken)
+  const suppliedBytes = Buffer.from(supplied)
+  const expectedBytes = Buffer.from(expected)
+  return suppliedBytes.length === expectedBytes.length
+    && timingSafeEqual(suppliedBytes, expectedBytes)
+}
 
 export function createGatewayApplication({
   config = defaultConfig,
@@ -47,14 +58,15 @@ export function createGatewayApplication({
   taskManager = defaultTaskManager,
   taskStore = defaultTaskStore,
   logger = defaultLogger,
+  contextService = null,
   parentPort = process.parentPort,
   autoStart = true,
   realtimeProviderRegistry = defaultRealtimeProviderRegistry,
   realtimeProvider = config.audioProvider,
 } = {}) {
-const inputAssetRegistry = inputAssets || new InputAssetRegistry({
-  sessionTtlMs: config.conversationSessionTtlMs,
-  maxSessions: config.maxConversationSessions,
+const hotelContextService = contextService || createHotelContextServiceFromConfig({
+  config,
+  logger,
 })
 const identityManager = new IdentityManager({
   secret: config.authSecret,
@@ -181,6 +193,13 @@ const permissionPolicy = new SessionPermissionPolicy({
   maxSessions: config.maxConversationSessions,
 })
 
+const contextWarmup = hotelContextService.warmup?.()
+if (contextWarmup?.catch) {
+  void contextWarmup.catch(error => {
+    logger.warn('hotel_context.warmup_failed', { error })
+  })
+}
+
 app.disable('x-powered-by')
 app.use(enforceSameOrigin)
 app.use((req, res, next) => {
@@ -248,6 +267,7 @@ app.get('/api/health', (req, res) => {
     // Front ends a client may select for its session through the realtime
     // connect event.
     realtimeProviders: realtime.providers,
+    voiceToolProfile: config.voiceToolProfile,
     announceIntoContext: config.announceIntoContext,
     resultContextMaxChars: config.resultContextMaxChars,
     announcementBatchMs: config.announcementBatchMs,
@@ -256,6 +276,7 @@ app.get('/api/health', (req, res) => {
     notes: notesStore.health(),
     taskStore: taskStore.health(),
     identityMode: config.identityMode,
+    contextService: hotelContextService.health(),
     voiceClients: realtimeGateway?.status() || {
       connected: 0,
       activeOwners: 0,
@@ -268,31 +289,29 @@ app.get('/api/health', (req, res) => {
   })
 })
 
-// Host control plane for microphone arbitration. The host announces that it is
-// taking the microphone and the Gateway commands its clients to stop capturing.
-// Both calls are idempotent per owner, and a suspension expires on its own so a
-// host that crashes cannot silence the Gateway for good.
-app.post('/api/input/suspend', (req, res) => {
-  try {
-    return res.json(inputArbitration.suspend({
-      owner: req.body?.owner,
-      reason: req.body?.reason,
-      ttlMs: req.body?.ttlMs,
-    }))
-  } catch (error) {
-    if (error?.code === 'QWAUDIO_INPUT_OWNER_REQUIRED') {
-      return res.status(400).json({ error: error.message, code: error.code })
-    }
-    throw error
+app.get('/v1/voice-contexts/:contextId', async (req, res) => {
+  if (!acceptsContextServiceToken(
+    req.headers.authorization,
+    config.contextServiceToken,
+  )) {
+    return res.status(401).json({ error: 'Context Service token 无效' })
   }
-})
-
-app.post('/api/input/resume', (req, res) => {
-  res.json(inputArbitration.resume({ owner: req.body?.owner }))
-})
-
-app.get('/api/input', (req, res) => {
-  res.json(inputArbitration.status())
+  const userId = String(req.query.userId || '').trim()
+  if (!userId) {
+    return res.status(400).json({ error: 'userId is required' })
+  }
+  try {
+    const context = await hotelContextService.getMockContext({
+      contextId: req.params.contextId,
+      userId,
+    })
+    return res.json(context)
+  } catch (error) {
+    return res.status(error?.status || 500).json({
+      error: error?.message || 'Context Mock 读取失败',
+      code: error?.code || 'HOTEL_CONTEXT_ERROR',
+    })
+  }
 })
 
 app.get('/api/backend/ui', async (req, res, next) => {
@@ -474,10 +493,7 @@ realtimeGateway = attachRealtimeGateway(server, {
     agent.respondPermission(id, decision, options)
   ),
   permissionPolicy,
-  inputAssets: inputAssetRegistry,
-  inputArbitration,
-  realtimeProviderRegistry,
-  defaultRealtimeProvider: realtimeProvider,
+  contextService: hotelContextService,
 })
 const start = ({ host = config.host, port = config.port } = {}) => {
   if (server.listening) return server
@@ -542,6 +558,7 @@ return {
     conversationSync,
     coordinator,
     frontendMemoryService,
+    contextService: hotelContextService,
     identityManager,
     inputArbitration,
     inputAssets: inputAssetRegistry,

@@ -60,7 +60,12 @@ export class ConversationSync {
     let state = this.sessions.get(key)
     if (!state) {
       this.enforceSessionLimit()
-      state = { messages: [], byId: new Map(), lastAccessedAt: Date.now() }
+      state = {
+        messages: [],
+        byId: new Map(),
+        taskFacts: new Map(),
+        lastAccessedAt: Date.now(),
+      }
       this.sessions.set(key, state)
     }
     state.lastAccessedAt = Date.now()
@@ -144,6 +149,50 @@ export class ConversationSync {
         ...message,
         inputs: (message.inputs || []).map(input => ({ ...input })),
       }))
+  }
+
+  recordTaskFact({
+    ownerId,
+    sessionId,
+    taskId,
+    summary,
+    status,
+    assignee,
+    note,
+  } = {}) {
+    const id = clean(taskId)
+    if (!id) return null
+    const state = this.state(ownerId, sessionId)
+    const previous = state.taskFacts.get(id) || { taskId: id }
+    const fact = {
+      ...previous,
+      ...(clean(summary) ? { summary: clean(summary).slice(0, 160) } : {}),
+      ...(clean(status) ? { status: clean(status).slice(0, 40) } : {}),
+      ...(clean(assignee) ? { assignee: clean(assignee).slice(0, 80) } : {}),
+      ...(clean(note) ? { note: clean(note).slice(0, 300) } : {}),
+      updatedAt: Date.now(),
+    }
+    state.taskFacts.set(id, fact)
+    while (state.taskFacts.size > 12) {
+      const oldest = [...state.taskFacts.entries()]
+        .sort((a, b) => a[1].updatedAt - b[1].updatedAt)[0]
+      if (!oldest) break
+      state.taskFacts.delete(oldest[0])
+    }
+    return { ...fact }
+  }
+
+  removeTaskFact({ ownerId, sessionId, taskId } = {}) {
+    const state = this.peek(ownerId, sessionId)
+    if (!state?.taskFacts) return false
+    return state.taskFacts.delete(clean(taskId))
+  }
+
+  taskContext({ ownerId, sessionId } = {}) {
+    const state = this.peek(ownerId, sessionId)
+    return [...(state?.taskFacts?.values() || [])]
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map(fact => ({ ...fact }))
   }
 
   hasEquivalentAssistantSpeech({

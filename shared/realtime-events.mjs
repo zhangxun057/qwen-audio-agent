@@ -44,6 +44,7 @@ export const GatewayServerEvent = Object.freeze({
   TRANSCRIPT_DELTA: 'transcript.delta',
   TRANSCRIPT_FINAL: 'transcript.final',
   TRANSCRIPT_DISCARD: 'transcript.discard',
+  KNOWLEDGE_CONTEXT: 'knowledge.context',
   TIMELINE_INLINE: 'timeline.inline',
   CLIENT_STATE: 'client.state',
   ERROR: 'error',

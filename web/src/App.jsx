@@ -151,6 +151,7 @@ export default function App() {
   }))
   const [waitingForVoice, setWaitingForVoice] = useState(false)
   const [messages, setMessages] = useState([])
+  const [textDraft, setTextDraft] = useState('')
   const [activity, setActivity] = useState(t('正在检查后台 Agent'))
   const [frontend, setFrontend] = useState({ label: 'Realtime Agent' })
   const [realtimeProviders, setRealtimeProviders] = useState([])
@@ -159,6 +160,8 @@ export default function App() {
   )
   const [modelStatus, setModelStatus] = useState(() => realtimeModelStatus())
   const [providerNotice, setProviderNotice] = useState('')
+  const [knowledgeContext, setKnowledgeContext] = useState(null)
+  const [knowledgeHistory, setKnowledgeHistory] = useState([])
   const [healthValidated, setHealthValidated] = useState(false)
   const [gatewayRuntime, setGatewayRuntime] = useState('connecting')
   const [backend, setBackend] = useState({
@@ -530,6 +533,30 @@ export default function App() {
     if (event.type === 'transcript.final' && event.role === 'user') {
       updateUserTranscript(event, true)
     }
+    if (
+      event.type === 'knowledge.context'
+      && ['matched', 'injected'].includes(event.state)
+    ) {
+      setKnowledgeContext({
+        id: event.id,
+        label: event.label,
+        version: event.version,
+        chars: event.chars,
+        keyword: event.keyword,
+        state: event.state,
+      })
+      if (event.state === 'injected') {
+        setKnowledgeHistory(items => [
+          ...items,
+          {
+            id: event.id,
+            label: event.label,
+            turnId: event.turnId,
+            keyword: event.keyword,
+          },
+        ].slice(-8))
+      }
+    }
     if (event.type === 'transcript.discard' && event.role === 'user') {
       setMessages(items => discardUserTranscript(items, event.turnId))
     }
@@ -753,6 +780,7 @@ export default function App() {
     // microphone capture and never closes or interrupts the output stream.
     inputOnlyMute: true,
     wakeWordOnly: voiceEnabledForWakeWord,
+    textOnly: !voiceEnabled && !voiceEnabledForWakeWord,
     clientType: desktopOrbMode ? 'desktop' : 'web',
     clientLabel: desktopOrbMode ? t('桌面端') : 'WebUI',
     clientStates: desktopOrbMode ? ['sleeping'] : [],
@@ -768,6 +796,14 @@ export default function App() {
       setActivity(message)
     },
   })
+  const submitText = event => {
+    event.preventDefault()
+    const content = textDraft.trim()
+    if (!content) return
+    if (voice.sendText(content, { textOnly: !voiceEnabled })) {
+      setTextDraft('')
+    }
+  }
   const lifecycleTransition = (
     desktopOrbMode && desktopLifecycle !== 'active'
   )
@@ -979,6 +1015,8 @@ export default function App() {
     setSessionId(next)
     setMessages([])
     setAgentTasks([])
+    setKnowledgeContext(null)
+    setKnowledgeHistory([])
     currentTurnId.current = ''
     activeVoiceResponse.current = ''
     responseTurnMap.current.clear()
@@ -1308,6 +1346,23 @@ export default function App() {
           {t(providerNotice)}
         </small>}
       </div>
+      {knowledgeContext && <div
+        className="knowledge-status"
+        title={[
+          `命中词：${knowledgeContext.keyword || ''}`,
+          knowledgeHistory.length
+            ? `本会话注入记录：${knowledgeHistory.map(item => item.label).join(' → ')}`
+            : '',
+        ].filter(Boolean).join('\n')}
+        role="status"
+      >
+        <b>{knowledgeContext.state === 'injected'
+          ? '知识库已动态注入'
+          : '已命中，正在加载知识库'}：{knowledgeContext.label}</b>
+        <small>{knowledgeContext.state === 'injected'
+          ? `第 ${knowledgeHistory.length} 次 · ${Number(knowledgeContext.chars || 0).toLocaleString()} 字`
+          : `${Number(knowledgeContext.chars || 0).toLocaleString()} 字 · 等待本轮注入`}</small>
+      </div>}
       {realtimeProviders.length > 1 && <select
         className="ghost frontend-provider"
         value={realtimeProvider}
@@ -1382,10 +1437,15 @@ export default function App() {
         </section>)}
       </div>
 
-      {composerEnabled && <MultimodalComposer
-        onSend={sendComposerInput}
-        onStage={voice.stageInputParts}
-      />}
+      <form className="text-composer" aria-label="消息输入" onSubmit={submitText}>
+        <input
+          value={textDraft}
+          onChange={event => setTextDraft(event.target.value)}
+          placeholder="输入消息"
+          aria-label="输入消息"
+        />
+        <button type="submit" disabled={!textDraft.trim()}>发送</button>
+      </form>
 
     </section>
   </main>

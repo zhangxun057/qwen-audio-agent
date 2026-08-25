@@ -1,0 +1,18 @@
+{
+  "contextId": "hotel-10082-daily",
+  "version": "2026-08-21-07",
+  "generatedAt": "2026-08-21T06:00:00+08:00",
+  "expiresAt": "2027-08-21T06:00:00+08:00",
+  "subject": {
+    "userId": "demo-user-hotel-10082",
+    "displayName": "张洵",
+    "hotelId": "10082"
+  },
+  "sections": {
+    "identity": "当前登录用户：演示用户；用户 ID：demo-user-hotel-10082。用户在不同任务中可能是创建人、执行人或协作人，不设置固定业务角色。",
+    "operatingRules": "用户明确说姓名时姓名优先；否则按时间、岗位、区域和工作量选择执行人。任务工具返回前不得声称操作成功。",
+    "source": "每日酒店运营上下文；由当前登录身份加载，供 hotel-direct 测试台直接注入。"
+  },
+  "promptFile": "hotel-10082-daily.prompt.md",
+  "estimatedTokens": 3100
+}

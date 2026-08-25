@@ -157,6 +157,27 @@ header {
 }
 .model-status small { overflow-wrap: anywhere; }
 .model-status .provider-notice { color: #f1c665; }
+.knowledge-status {
+  min-width: 0;
+  max-width: 245px;
+  display: grid;
+  gap: 2px;
+  padding: 5px 9px;
+  border: 1px solid #50dfab42;
+  border-radius: 9px;
+  background: #50dfab0d;
+  color: #8fbaa9;
+  font-size: 10px;
+  line-height: 1.25;
+}
+.knowledge-status b {
+  overflow: hidden;
+  color: #76e8bd;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.knowledge-status small { overflow-wrap: anywhere; }
 .status i { width: 7px; height: 7px; border-radius: 50%; background: #555; }
 .status i.listening { background: #50dfab; box-shadow: 0 0 12px #50dfab; }
 .status i.processing { background: #f1c665; box-shadow: 0 0 12px #f1c665; }
@@ -175,6 +196,34 @@ header .voice.waiting { color: #ded5ff; border-color: #927cf480; }
   flex-direction: column;
   overflow: hidden;
 }
+.text-composer {
+  width: 100%;
+  display: flex;
+  gap: 9px;
+  margin-top: 14px;
+  padding: 9px;
+  border: 1px solid #ffffff16;
+  border-radius: 14px;
+  background: #111016d9;
+}
+.text-composer input {
+  min-width: 0;
+  flex: 1;
+  padding: 10px 12px;
+  border: 0;
+  outline: 0;
+  color: #ece9f2;
+  background: transparent;
+  font: inherit;
+}
+.text-composer button {
+  padding: 9px 16px;
+  border: 1px solid #785cf480;
+  border-radius: 10px;
+  color: white;
+  background: #785cf4;
+}
+.text-composer button:disabled { opacity: .4; }
 
 .hero { flex: 0 0 auto; text-align: center; }
 .hero p { margin: 22px 0 7px; color: #8e7ed0; font-size: 9px; letter-spacing: .23em; }
@@ -1060,7 +1109,8 @@ article.user .message-body .inline-code { background: #5e44c9; color: #f0eaff; }
 
 @media (max-width: 600px) {
   header { padding: 0 14px; }
-  .brand small, header .ghost, .backend, .model-status small { display: none; }
+  .brand small, header .ghost, .backend, .model-status small, .knowledge-status small { display: none; }
+  .knowledge-status { max-width: min(40vw, 190px); }
   .model-status { max-width: min(42vw, 220px); }
   .workspace { padding: 24px 0 14px; }
   .orb:not(.desktop-orb) { width: 92px; height: 92px; }

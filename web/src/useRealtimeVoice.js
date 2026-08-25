@@ -189,6 +189,7 @@ export default function useRealtimeVoice({
   outputMuted = false,
   inputOnlyMute = false,
   wakeWordOnly = false,
+  textOnly = false,
   clientType = 'web',
   clientLabel = 'WebUI',
   clientStates = [],
@@ -473,10 +474,10 @@ export default function useRealtimeVoice({
           type: GatewayClientEvent.CONNECT,
           timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           locale: navigator.language,
-          voiceEnabled: mode.outputEnabled,
-          inputEnabled: mode.inputEnabled,
-          outputEnabled: mode.outputEnabled,
-          textOnly: mode.textOnly,
+          voiceEnabled: outputEnabled,
+          inputEnabled,
+          outputEnabled,
+          textOnly,
           wakeWordOnly: wakeWordOnlyRef.current,
           clientType,
           clientLabel,
@@ -609,6 +610,7 @@ export default function useRealtimeVoice({
     stopPlayback,
     suspended,
     takeover,
+    textOnly,
   ])
 
   useEffect(() => {
@@ -738,15 +740,16 @@ export default function useRealtimeVoice({
     sendSocketEvent({ type: GatewayClientEvent.WAKE })
   ), [sendSocketEvent])
 
-  const sendInput = useCallback(parts => sendSocketEvent({
-    type: GatewayClientEvent.INPUT_MESSAGE,
-    parts,
-  }), [sendSocketEvent])
-
-  const stageInputParts = useCallback(parts => sendSocketEvent({
-    type: GatewayClientEvent.INPUT_PARTS,
-    parts,
-  }), [sendSocketEvent])
+  const sendText = useCallback((text, { textOnly = false } = {}) => {
+    const content = String(text || '').trim()
+    if (!content) return false
+    sendSocketEvent({
+      type: GatewayClientEvent.TEXT_MESSAGE,
+      text: content,
+      textOnly,
+    })
+    return true
+  }, [sendSocketEvent])
 
   return {
     state,
@@ -759,6 +762,7 @@ export default function useRealtimeVoice({
     ownership,
     activateAudio,
     interrupt,
+    sendText,
     wake,
     sendInput,
     stageInputParts,

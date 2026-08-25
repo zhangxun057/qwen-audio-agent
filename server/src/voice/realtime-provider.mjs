@@ -25,7 +25,21 @@ export {
   NOTES_TOOL_NAME,
   RESPOND_AGENT_PERMISSION_TOOL_NAME,
   ENTER_SLEEP_TOOL_NAME,
+  SPIRIT_TASK_LIST_TOOL_NAME,
+  SPIRIT_TASK_DETAIL_TOOL_NAME,
+  SPIRIT_TASK_COMMENTS_TOOL_NAME,
+  SPIRIT_TASK_CREATE_TOOL_NAME,
+  SPIRIT_TASK_UPDATE_TOOL_NAME,
+  SPIRIT_TASK_START_TOOL_NAME,
+  SPIRIT_TASK_COMPLETE_TOOL_NAME,
+  SPIRIT_TASK_UPDATE_STATUS_TOOL_NAME,
+  SPIRIT_TASK_ADD_COMMENT_TOOL_NAME,
+  SPIRIT_TASK_DELETE_TOOL_NAME,
+  SPIRIT_VOICE_NOTIFY_TOOL_NAME,
+  STANDARD_TOOL_PROFILE,
+  HOTEL_DIRECT_TOOL_PROFILE,
   TOOLS,
+  HOTEL_DIRECT_TOOLS,
   frontendTools,
   buildFrontendInstructions,
 } from './frontend-tools.mjs'
@@ -278,13 +292,17 @@ export class RealtimeFrontend {
     this.send(this.protocol.audioAppend(audio))
   }
 
-  sendUserText(text, context = {}, { modalities } = {}) {
+  sendUserText(text, context = {}, { modalities, response } = {}) {
     const content = String(text || '').trim()
     if (!content) return Promise.resolve()
     return this.enqueueResponse('model', context, async () => {
       await this.createConversationItem(this.protocol.userTextItem(content))
+      const responseOptions = {
+        ...(response || {}),
+        ...(modalities ? { modalities } : {}),
+      }
       this.send(this.protocol.responseCreate(
-        modalities ? { modalities } : undefined,
+        Object.keys(responseOptions).length ? responseOptions : undefined,
       ))
     })
   }
