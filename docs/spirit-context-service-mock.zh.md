@@ -21,7 +21,7 @@ config/hotel-direct/context-mock/hotel-10082-daily.json
 本地 Mock 接口可直接验证：
 
 ```http
-GET http://127.0.0.1:3101/v1/voice-contexts/hotel-10082-daily?userId=demo-user-hotel-10082
+GET http://127.0.0.1:3101/v1/voice-contexts/hotel-10082-daily?userId=2079697_hotel_10082
 ```
 
 若配置了 `QWEN_AUDIO_CONTEXT_SERVICE_TOKEN`，请求必须携带同值 Bearer Token；未配置时
@@ -33,7 +33,7 @@ GET http://127.0.0.1:3101/v1/voice-contexts/hotel-10082-daily?userId=demo-user-h
 ```dotenv
 QWEN_AUDIO_CONTEXT_MODE=http
 QWEN_AUDIO_CONTEXT_ID=hotel-10082-daily
-QWEN_AUDIO_CONTEXT_USER_ID=demo-user-hotel-10082
+QWEN_AUDIO_CONTEXT_USER_ID=2079697_hotel_10082
 QWEN_AUDIO_CONTEXT_SERVICE_URL=https://context.example.com
 QWEN_AUDIO_CONTEXT_SERVICE_TOKEN=replace-with-service-token
 QWEN_AUDIO_CONTEXT_FALLBACK_TO_MOCK=true
@@ -101,7 +101,7 @@ Gateway 是语音网页与千问 Realtime WebSocket 之间的服务端运行层�
 ### 4.1 请求
 
 ```http
-GET /v1/voice-contexts/hotel-10082-daily?userId=demo-user-hotel-10082
+GET /v1/voice-contexts/hotel-10082-daily?userId=2079697_hotel_10082
 Accept: application/json
 Authorization: Bearer <gateway-service-token>
 ```
@@ -121,7 +121,7 @@ Authorization: Bearer <gateway-service-token>
   "generatedAt": "2026-08-21T06:00:00+08:00",
   "expiresAt": "2026-08-22T06:00:00+08:00",
   "subject": {
-    "userId": "demo-user-hotel-10082",
+    "userId": "2079697_hotel_10082",
     "displayName": "张洵",
     "hotelId": "10082"
   },

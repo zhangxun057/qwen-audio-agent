@@ -181,6 +181,8 @@ Gateway（会话、身份、工具和结果播报）
         │ HTTP + Bearer Token
         ▼
 Spirit Task API（查询、创建、更新、开始、完成、记录、删除）
+        │
+        └── Atomic Space MCP（索引、动态实例、元模型、事件写入/查询）
 ```
 
 启用方式：
@@ -198,10 +200,13 @@ QWEN_AUDIO_AGENT_TOOL_PROFILE=hotel-direct
   时间、创建人、执行人和必要的完成记录等核心字段。
 - 创建和修改任务时，Gateway 确定性解析“几点开始”“几点前完成”等时间表达；已知动作
   才按标准时长推算，不让模型猜测或把时间塞进描述。
-- 通知是独立结果。只有任务操作和通知都返回成功，语音才会说“已通知”；通知开关关闭时
-  会明确返回跳过原因，不伪报成功。
+- 创建任务时，创建工具内部顺便发送通知，Gateway 最多等待 5 秒，并在一条语音中同时回报
+  任务和通知结果；超时只说“通知结果暂未确认”，不会再追加第二条通知语音。独立通知工具
+  只用于不创建任务的传话场景，通知开关关闭或发送失败都会如实说明。
 - Context Mock 只用于验证 `userId → Context Service → Realtime instructions` 的形状。
   生产环境应切到 HTTP Context API，并由服务端按可信身份生成每日上下文。
+
+原子记录工具也由 Gateway 直接提供：`atomic_record_write` 写入已经发生的事实，`atomic_record_query` 负责查询，`atomic_record_correct` 负责更正或删除。当前通过 `MockAtomicSpaceProvider` 读取 `config/hotel-direct/atomic-space-mock/`，模拟未来 Atomic Space MCP 的 `get_index`、`search_instances`、`write_instance`、`query_instances` 和 `correct_instance`。新事件只分“物品、客人、酒店、其他”四类。语音快模型入口采用严格契约，要求类别、事实时间性质、动作和一句可独立理解的完整事实；底层 MCP 为慢模型和开放世界事项保留 `category + content` 的最小兜底契约，结构化维度和实体关联按可靠信息补齐。员工说“2615 房”“矿泉水”“本次住店”即可，Gateway 会解析为规范实体 ID；特殊物品、公共地点或动态实体暂时无法映射时也先保存事实，不向员工索要 ID。任务记录待执行工作，原子记录记录已经发生的事实，快模型同一轮二选一。默认事件落在 `~/.config/qwaudio/atomic-records.json`，接入云端时只替换 provider，不改前台工具契约。详细接口见 [Atomic Space MCP 对接稿](docs/atomic-space-mcp-contract.zh.md)。
 
 分享或部署这个 Demo 时，请从[可分享版配置说明](docs/getting-started/share.zh.md)开始。
 仓库只放占位符，不包含账号、密码、API Key、Bearer Token 或真实任务 ID。
