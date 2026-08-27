@@ -7,24 +7,31 @@ const PROMPT_FILE = 'PROMPT.md'
 const ASSISTANT_FILE = 'ASSISTANT.md'
 const MAX_PROMPT_CHARS = 16000
 const MAX_ASSISTANT_CHARS = 4000
-const MAX_RECENT_MESSAGES = 10
-const MAX_RECENT_CHARS = 3500
+// Realtime models keep their own live conversation, but a reconnect needs a
+// compact replay. Keep roughly the last twenty short turns, including tool
+// confirmations, without replaying a full transcript.
+const MAX_RECENT_MESSAGES = 20
+const MAX_RECENT_CHARS = 6000
 const MAX_TASK_CONTEXT = 1800
+const MAX_RECORD_CONTEXT = 1800
 
 function clean(value) {
   return String(value || '').replace(/\s+/g, ' ').trim()
 }
 
 export function normalizeClientContext({
-  timeZone,
+  timeZone = 'Asia/Shanghai',
   locale,
   workingDirectory,
 } = {}) {
-  let safeTimeZone = clean(timeZone)
+  // Hotel voice sessions are China-local by default. Never inherit the
+  // Gateway machine's timezone (often UTC) when the client omits or sends an
+  // empty/invalid value.
+  let safeTimeZone = clean(timeZone) || 'Asia/Shanghai'
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: safeTimeZone }).format()
   } catch {
-    safeTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    safeTimeZone = 'Asia/Shanghai'
   }
   let safeLocale = clean(locale).slice(0, 35) || 'zh-CN'
   try {
@@ -163,6 +170,33 @@ function taskContextSection(taskContext = []) {
   ].join('\n')
 }
 
+function recordContextSection(recordContext = []) {
+  if (!Array.isArray(recordContext) || !recordContext.length) return ''
+  const lines = []
+  let used = 0
+  for (const fact of recordContext.slice(0, 8)) {
+    const line = [
+      fact.room ? `${clean(fact.room)}房` : '',
+      fact.location ? `地点=${clean(fact.location).slice(0, 120)}` : '',
+      clean(fact.action),
+      clean(fact.item)
+        ? `${clean(fact.item)}${fact.quantity ?? ''}${clean(fact.unit)}`
+        : '',
+      !fact.item && clean(fact.summary) ? clean(fact.summary).slice(0, 240) : '',
+    ].filter(Boolean).join('，')
+    if (!line || (lines.length && used + line.length > MAX_RECORD_CONTEXT)) break
+    lines.push(`- ${line}`)
+    used += line.length
+  }
+  if (!lines.length) return ''
+  return [
+    '<recent_confirmed_records>',
+    '以下是本会话刚刚确认保存的事实。用户追问“刚才、哪个房间、那条记录”时先使用它，不要否认已经确认过的事实；询问当前真实数据时仍以查询工具为准。不要朗读内部编号。',
+    ...lines,
+    '</recent_confirmed_records>',
+  ].join('\n')
+}
+
 function enterpriseContextSection(context = null) {
   const prompt = String(context?.prompt || '').trim()
   if (!prompt) return ''
@@ -219,6 +253,7 @@ export function buildFrontendContext({
   memories = [],
   enterpriseContext = null,
   taskContext = [],
+  recordContext = [],
   activeKnowledge = null,
   supplementalContext = '',
 } = {}) {
@@ -237,6 +272,7 @@ export function buildFrontendContext({
     userPreferencesSection(memories),
     memorySection(memories),
     enterpriseContextSection(enterpriseContext),
+    recordContextSection(recordContext),
     taskContextSection(taskContext),
     String(supplementalContext || '').trim(),
     dynamicKnowledgeCoordinationSection(),

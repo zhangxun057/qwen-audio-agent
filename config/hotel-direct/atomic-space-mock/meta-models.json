@@ -1,0 +1,49 @@
+{
+  "version": 2,
+  "models": {
+    "event": {
+      "modelType": "event",
+      "idStrategy": "gateway_generated",
+      "requiredFields": ["category", "content"],
+      "fields": {
+        "category": {
+          "type": "enum",
+          "values": ["物品", "客人", "酒店", "其他"],
+          "source": "model"
+        },
+        "action": { "type": "string", "source": "model", "required": false },
+        "content": {
+          "type": "string",
+          "source": "model",
+          "description": "表述准确、维度齐备、可独立理解的事实"
+        },
+        "facts": {
+          "type": "object",
+          "source": "model",
+          "required": false,
+          "additionalProperties": true
+        },
+        "entities": {
+          "type": "entity[]",
+          "source": "model_then_gateway_resolve",
+          "required": false
+        },
+        "occurredAt": { "type": "datetime", "source": "gateway_default" },
+        "source": { "type": "object", "source": "gateway" },
+        "actors": { "type": "object", "source": "gateway_or_model_fact_actor" }
+      },
+      "categories": {
+        "物品": {
+          "actions": ["送出", "消耗", "借出", "归还", "售出", "库存核实", "库存调整", "拾获", "交存"]
+        },
+        "客人": {
+          "actions": ["投诉", "要求", "报失", "偏好", "住店变化", "服务结果"]
+        },
+        "酒店": {
+          "actions": ["异常报告", "故障核实", "运行变化", "交接", "恢复"]
+        },
+        "其他": { "actions": [], "openWorld": true }
+      }
+    }
+  }
+}

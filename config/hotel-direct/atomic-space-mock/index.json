@@ -1,0 +1,631 @@
+{
+  "version": 2,
+  "tenantScope": "hotel-10082",
+  "models": {
+    "room": { "kind": "static", "idRule": "compose" },
+    "item": { "kind": "static", "idRule": "lookup" },
+    "employee": { "kind": "static", "idRule": "lookup" },
+    "stay": { "kind": "dynamic", "operation": "search_instances" },
+    "order": { "kind": "dynamic", "operation": "search_instances" },
+    "guest": { "kind": "dynamic", "operation": "search_instances" },
+    "location": { "kind": "open_world", "idRule": "compose_or_unresolved" },
+    "event": { "kind": "appendable", "operation": "write_instance" }
+  },
+  "idRules": {
+    "room": {
+      "mode": "compose",
+      "template": "room:{roomNumber}",
+      "normalize": "digits_3_or_4"
+    },
+    "item": { "mode": "lookup", "allowUnregistered": true, "fallback": "item:unresolved:{stableToken}" },
+    "stay": { "mode": "lookup" },
+    "order": { "mode": "lookup" },
+    "location": {
+      "mode": "compose_or_unresolved",
+      "floorAreaTemplate": "location:floor-{floor}:{area}",
+      "fallback": "location:unresolved:{stableToken}"
+    }
+  },
+  "writeContracts": {
+    "event": {
+      "schemaVersion": "event.v2",
+      "minimumInput": ["category", "content"],
+      "traceableEntityPolicy": {
+        "genericMentions": {
+          "room": ["房间", "客房", "这个房间", "那个房间"],
+          "stay": ["住店记录", "入住记录", "本次住店", "这次入住"],
+          "order": ["订单", "这张订单", "那个订单", "携程订单", "美团订单", "平台订单", "OTA订单"],
+          "guest": ["客人", "客户", "住客", "这个客人", "那位客人", "有人"]
+        }
+      },
+      "categories": {
+        "物品": {
+          "meaning": "物品的送出、消耗、借还、售卖、库存结果和拾获交存",
+          "suggestedActions": ["送出", "消耗", "借出", "归还", "售出", "库存核实", "库存调整", "拾获", "交存"],
+          "suggestedFacts": ["itemName", "quantity", "unit", "location", "sourceLocation", "targetLocation", "amount", "currency", "condition", "reason"],
+          "actionRules": {
+            "借出": {
+              "aliases": ["借用", "外借", "借给"],
+              "requiredFacts": ["itemName", "quantity", "unit"],
+              "anyEntityTypes": ["room", "stay", "guest", "employee"],
+              "clarification": "请补充借出的物品、数量，以及借给谁。",
+              "questions": {
+                "facts": {
+                  "itemName": "借出的是什么物品？",
+                  "quantity": "借出了多少？",
+                  "unit": "借出数量的单位是什么？"
+                },
+                "factsCombined": "借出的是什么物品，数量是多少？",
+                "entity": "借给哪个房间、哪位客人或哪位员工？",
+                "combined": "借出的是什么、多少，借给谁？"
+              }
+            }
+          }
+        },
+        "客人": {
+          "meaning": "客人的投诉、要求、报失、偏好和本次住店事实",
+          "suggestedActions": ["投诉", "要求", "报失", "偏好", "住店变化", "服务结果"],
+          "suggestedFacts": ["statement", "request", "preference", "objectName", "location", "result", "reason"],
+          "actionRules": {
+            "投诉": {
+              "aliases": ["客诉"],
+              "requiredFacts": ["statement"],
+              "anyEntityTypes": ["room", "stay", "order", "guest"],
+              "anyEntityRoles": ["complainant"],
+              "requireTraceableEntity": true,
+              "clarificationGuidance": "还需要能够定位具体投诉人的线索；结合已经知道的渠道、时间和投诉内容，只追问一个最容易补充的信息",
+              "entityHints": ["房号", "客人姓名", "具体订单号", "入住日期"]
+            },
+            "要求": {
+              "aliases": ["住店要求", "需求"],
+              "anyEntityTypes": ["room", "stay", "order", "guest"],
+              "requireTraceableEntity": true,
+              "clarificationGuidance": "还需要知道这项要求属于哪位可追踪客人或哪次住店",
+              "entityHints": ["房号", "客人姓名", "具体订单号", "入住日期"]
+            },
+            "报失": {
+              "aliases": ["遗失报告", "丢失"],
+              "anyEntityTypes": ["room", "stay", "order", "guest"],
+              "requireTraceableEntity": true,
+              "clarificationGuidance": "还需要知道是哪位客人报告遗失，方便后续联系和查询",
+              "entityHints": ["房号", "客人姓名", "具体订单号", "入住日期"]
+            },
+            "偏好": {
+              "aliases": ["住店偏好"],
+              "anyEntityTypes": ["room", "stay", "order", "guest"],
+              "requireTraceableEntity": true,
+              "clarificationGuidance": "还需要知道这项偏好属于哪位客人或哪次住店",
+              "entityHints": ["房号", "客人姓名", "具体订单号", "入住日期"]
+            },
+            "住店变化": {
+              "aliases": ["换房", "续住", "提前退房"],
+              "anyEntityTypes": ["room", "stay", "order", "guest"],
+              "requireTraceableEntity": true,
+              "clarificationGuidance": "还需要知道发生变化的是哪位客人或哪次住店",
+              "entityHints": ["房号", "客人姓名", "具体订单号", "入住日期"]
+            },
+            "服务结果": {
+              "aliases": ["服务完成", "服务反馈"],
+              "anyEntityTypes": ["room", "stay", "order", "guest"],
+              "requireTraceableEntity": true,
+              "clarificationGuidance": "还需要知道这次服务结果属于哪位客人或哪次住店",
+              "entityHints": ["房号", "客人姓名", "具体订单号", "入住日期"]
+            },
+            "寄存": {
+              "aliases": ["行李寄存"],
+              "anyEntityTypes": ["room", "stay", "order", "guest"],
+              "requireTraceableEntity": true,
+              "clarificationGuidance": "还需要知道是谁寄存的，确保后续能够核验领取人",
+              "entityHints": ["房号", "客人姓名", "具体订单号", "入住日期"]
+            },
+            "预留": {
+              "aliases": ["预订保留"],
+              "anyEntityTypes": ["room", "stay", "order", "guest"],
+              "requireTraceableEntity": true,
+              "clarificationGuidance": "还需要知道这项预留属于哪位客人或哪次住店",
+              "entityHints": ["房号", "客人姓名", "具体订单号", "入住日期"]
+            }
+          }
+        },
+        "酒店": {
+          "meaning": "房间设施、公共区域、交通天气、班次交接等影响酒店运行的已发生事实",
+          "suggestedActions": ["异常报告", "故障核实", "运行变化", "交接", "恢复"],
+          "suggestedFacts": ["observation", "location", "scope", "result", "reason", "validFrom", "validUntil"]
+        },
+        "其他": {
+          "meaning": "不适合前三类或当下无法稳定分类的事实",
+          "suggestedActions": [],
+          "suggestedFacts": [],
+          "allowEmptyFacts": true,
+          "allowEmptyEntities": true,
+          "allowAdditionalFacts": true
+        }
+      }
+    }
+  },
+  "staticInstances": [
+    {
+      "type": "room",
+      "id": "room:2015",
+      "name": "2015",
+      "aliases": ["2015", "2015房", "2015房间"],
+      "floor": 20,
+      "roomType": "标准大床房"
+    },
+    {
+      "type": "room",
+      "id": "room:2301",
+      "name": "2301",
+      "aliases": ["2301", "2301房", "2301房间"],
+      "floor": 23,
+      "roomType": "标准大床房"
+    },
+    {
+      "type": "room",
+      "id": "room:2615",
+      "name": "2615",
+      "aliases": ["2615", "2615房", "2615房间"],
+      "floor": 26,
+      "roomType": "标准大床房"
+    },
+    {
+      "type": "item",
+      "id": "item:mineral-water",
+      "name": "矿泉水",
+      "displayName": "矿泉水",
+      "aliases": ["水", "矿泉水", "瓶装水"],
+      "itemKind": "consumable",
+      "defaultUnit": "瓶",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:tissue",
+      "name": "抽纸",
+      "displayName": "抽纸",
+      "aliases": ["抽纸", "纸巾", "面巾纸"],
+      "itemKind": "consumable",
+      "defaultUnit": "包",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:toilet-paper",
+      "name": "卷纸",
+      "displayName": "卷纸",
+      "aliases": ["卷纸", "卫生纸"],
+      "itemKind": "consumable",
+      "defaultUnit": "卷",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:toothbrush",
+      "name": "牙刷",
+      "displayName": "牙刷",
+      "aliases": ["牙刷", "一次性牙刷"],
+      "itemKind": "consumable",
+      "defaultUnit": "把",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:toothpaste",
+      "name": "牙膏",
+      "displayName": "牙膏",
+      "aliases": ["牙膏"],
+      "itemKind": "consumable",
+      "defaultUnit": "支",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:shampoo",
+      "name": "洗发水",
+      "displayName": "洗发水",
+      "aliases": ["洗发水", "洗发液"],
+      "itemKind": "consumable",
+      "defaultUnit": "瓶",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:shower-gel",
+      "name": "沐浴露",
+      "displayName": "沐浴露",
+      "aliases": ["沐浴露", "沐浴液"],
+      "itemKind": "consumable",
+      "defaultUnit": "瓶",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:conditioner",
+      "name": "护发素",
+      "displayName": "护发素",
+      "aliases": ["护发素"],
+      "itemKind": "consumable",
+      "defaultUnit": "瓶",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:soap",
+      "name": "香皂",
+      "displayName": "香皂",
+      "aliases": ["香皂", "肥皂"],
+      "itemKind": "consumable",
+      "defaultUnit": "块",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:slippers",
+      "name": "一次性拖鞋",
+      "displayName": "一次性拖鞋",
+      "aliases": ["拖鞋", "一次性拖鞋"],
+      "itemKind": "consumable",
+      "defaultUnit": "双",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:comb",
+      "name": "梳子",
+      "displayName": "梳子",
+      "aliases": ["梳子"],
+      "itemKind": "consumable",
+      "defaultUnit": "把",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:cotton-swabs",
+      "name": "棉签",
+      "displayName": "棉签",
+      "aliases": ["棉签", "棉棒"],
+      "itemKind": "consumable",
+      "defaultUnit": "包",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:tea-bag",
+      "name": "茶包",
+      "displayName": "茶包",
+      "aliases": ["茶包", "茶叶包"],
+      "itemKind": "consumable",
+      "defaultUnit": "包",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:coffee",
+      "name": "咖啡",
+      "displayName": "咖啡",
+      "aliases": ["咖啡", "咖啡包"],
+      "itemKind": "consumable",
+      "defaultUnit": "包",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:cigarettes",
+      "name": "香烟",
+      "displayName": "香烟",
+      "aliases": ["烟", "香烟", "中华"],
+      "itemKind": "sellable",
+      "defaultUnit": "包",
+      "chargeable": true,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:instant-noodles",
+      "name": "方便面",
+      "displayName": "方便面",
+      "aliases": ["方便面", "泡面"],
+      "itemKind": "sellable",
+      "defaultUnit": "桶",
+      "chargeable": true,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:beer",
+      "name": "啤酒",
+      "displayName": "啤酒",
+      "aliases": ["啤酒", "酒"],
+      "itemKind": "sellable",
+      "defaultUnit": "罐",
+      "chargeable": true,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "employee",
+      "id": "employee:zhang-xun",
+      "name": "张洵",
+      "aliases": ["张洵", "我", "我自己"],
+      "role": "RA楼层服务员"
+    },
+    {
+      "type": "employee",
+      "id": "employee:huang-weiwei",
+      "name": "黄维维",
+      "aliases": ["黄维维"],
+      "role": "RA楼层服务员"
+    },
+    {
+      "type": "employee",
+      "id": "employee:qu-junyu",
+      "name": "曲俊宇",
+      "aliases": ["曲俊宇"],
+      "role": "RA楼层服务员"
+    },
+    {
+      "type": "item",
+      "id": "item:charger",
+      "name": "充电器",
+      "displayName": "充电器",
+      "aliases": ["充电器", "充电头", "充电线"],
+      "itemKind": "loanable",
+      "defaultUnit": "个",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:power-bank",
+      "name": "充电宝",
+      "displayName": "充电宝",
+      "aliases": ["充电宝", "移动电源", "移动充电宝"],
+      "itemKind": "loanable",
+      "defaultUnit": "个",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:latex-pillow",
+      "name": "乳胶枕",
+      "displayName": "乳胶枕",
+      "aliases": ["乳胶枕"],
+      "itemKind": "loanable",
+      "defaultUnit": "个",
+      "chargeable": true,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:pillow",
+      "name": "枕头",
+      "displayName": "枕头",
+      "aliases": ["枕头", "普通枕头"],
+      "itemKind": "loanable",
+      "defaultUnit": "个",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:children-toiletries",
+      "name": "儿童洗护用品",
+      "displayName": "儿童洗护用品",
+      "aliases": ["儿童洗护", "儿童洗护用品"],
+      "itemKind": "consumable",
+      "defaultUnit": "套",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:umbrella",
+      "name": "雨伞",
+      "displayName": "雨伞",
+      "aliases": ["雨伞", "伞"],
+      "itemKind": "loanable",
+      "defaultUnit": "把",
+      "chargeable": true,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:blanket",
+      "name": "毛毯",
+      "displayName": "毛毯",
+      "aliases": ["毛毯", "毯子"],
+      "itemKind": "loanable",
+      "defaultUnit": "条",
+      "chargeable": true,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:quilt",
+      "name": "被子",
+      "displayName": "被子",
+      "aliases": ["被子", "被褥"],
+      "itemKind": "loanable",
+      "defaultUnit": "床",
+      "chargeable": true,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:bathrobe",
+      "name": "浴袍",
+      "displayName": "浴袍",
+      "aliases": ["浴袍"],
+      "itemKind": "loanable",
+      "defaultUnit": "件",
+      "chargeable": true,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:hair-dryer",
+      "name": "吹风机",
+      "displayName": "吹风机",
+      "aliases": ["吹风机", "电吹风"],
+      "itemKind": "loanable",
+      "defaultUnit": "台",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:adapter",
+      "name": "转换插头",
+      "displayName": "转换插头",
+      "aliases": ["转换插头", "插头", "转接头"],
+      "itemKind": "loanable",
+      "defaultUnit": "个",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:baby-crib",
+      "name": "婴儿床",
+      "displayName": "婴儿床",
+      "aliases": ["婴儿床", "宝宝床"],
+      "itemKind": "loanable",
+      "defaultUnit": "张",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:shower-cap",
+      "name": "浴帽",
+      "displayName": "浴帽",
+      "aliases": ["浴帽"],
+      "itemKind": "consumable",
+      "defaultUnit": "个",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:razor",
+      "name": "剃须刀",
+      "displayName": "剃须刀",
+      "aliases": ["剃须刀", "刮胡刀"],
+      "itemKind": "consumable",
+      "defaultUnit": "把",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:bath-towel",
+      "name": "浴巾",
+      "displayName": "浴巾",
+      "aliases": ["浴巾"],
+      "itemKind": "circulating",
+      "defaultUnit": "条",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:face-towel",
+      "name": "面巾",
+      "displayName": "面巾",
+      "aliases": ["面巾", "毛巾", "方巾"],
+      "itemKind": "circulating",
+      "defaultUnit": "条",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:floor-mat",
+      "name": "地巾",
+      "displayName": "地巾",
+      "aliases": ["地巾", "脚垫"],
+      "itemKind": "circulating",
+      "defaultUnit": "条",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:laundry-bag",
+      "name": "洗衣袋",
+      "displayName": "洗衣袋",
+      "aliases": ["洗衣袋"],
+      "itemKind": "consumable",
+      "defaultUnit": "个",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:iron",
+      "name": "熨斗",
+      "displayName": "熨斗",
+      "aliases": ["熨斗", "电熨斗"],
+      "itemKind": "loanable",
+      "defaultUnit": "台",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:extension-cord",
+      "name": "插线板",
+      "displayName": "插线板",
+      "aliases": ["插线板", "排插", "接线板"],
+      "itemKind": "loanable",
+      "defaultUnit": "个",
+      "chargeable": false,
+      "catalogSource": "hotel_default"
+    },
+    {
+      "type": "item",
+      "id": "item:soft-drink",
+      "name": "软饮",
+      "displayName": "软饮",
+      "aliases": ["饮料", "可乐", "汽水", "软饮"],
+      "itemKind": "sellable",
+      "defaultUnit": "瓶",
+      "chargeable": true,
+      "catalogSource": "hotel_default"
+    }
+  ],
+  "dynamicModels": [
+    {
+      "type": "stay",
+      "operation": "search_instances",
+      "filters": ["roomId", "roomNumber", "guestName", "occurredAt"],
+      "returns": ["stayId", "guestId", "orderId", "roomHistory"]
+    },
+    {
+      "type": "order",
+      "operation": "search_instances",
+      "filters": ["stayId", "orderNo", "guestName"],
+      "returns": ["orderId", "stayId", "guestId"]
+    },
+    {
+      "type": "guest",
+      "operation": "search_instances",
+      "filters": ["guestName", "stayId"],
+      "returns": ["guestId", "displayName"]
+    }
+  ]
+}

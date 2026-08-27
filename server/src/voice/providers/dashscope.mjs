@@ -7,6 +7,7 @@ import {
   frontendTools,
   resultResponseInstructions,
   speakResponseInstructions,
+  verbatimSpeakResponseInstructions,
   permissionResponseInstructions,
 } from '../frontend-tools.mjs'
 import { isRecoverableRealtimeInactivityError } from '../realtime-errors.mjs'
@@ -19,10 +20,10 @@ function classifyError(message) {
   if (
     /invalid[_ -]?api[_ -]?key|incorrect api key|authentication failed|unauthorized|unexpected server response: (?:401|403)/i
       .test(message)
-    || /\barrearage\b|account is not in good standing/i.test(message)
+    || /\barrearage\b|access denied.*account.*good standing|account.*not in good standing/i.test(message)
     || /allocationquota\.freetieronly|free allocated quota exceeded|free tier .* exhausted/i
       .test(message)
-    || /model(?:\.|_)?accessdenied|model[_ -]?not[_ -]?found/i.test(message)
+    || /model(?:\.|_)?accessdenied|model[_ -]?not[_ -]?found|access to model denied/i.test(message)
   ) return 'fatal'
   return 'other'
 }
@@ -89,10 +90,12 @@ export const dashscopeProvider = {
     return session
   },
 
-  buildSpeakResponse: (content, { textOnly = false } = {}) => ({
+  buildSpeakResponse: (content, { textOnly = false, verbatim = false } = {}) => ({
     conversation: 'none',
     modalities: responseModalities(activeModelProfile(), { textOnly }),
-    instructions: speakResponseInstructions(content),
+    instructions: verbatim
+      ? verbatimSpeakResponseInstructions(content)
+      : speakResponseInstructions(content),
   }),
 
   buildResultInjection: (content, { textOnly = false } = {}) => ({

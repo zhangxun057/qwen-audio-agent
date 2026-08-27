@@ -25,7 +25,10 @@ import { recordTaskResult } from '../conversation/task-result-projector.mjs'
 import { ToolCallHandler } from './tools/tool-call-handler.mjs'
 import { TurnTranscripts } from './tools/turn-transcripts.mjs'
 import { TurnCorrelation } from './turn-correlation.mjs'
-import { streamingInputTranscript } from './input-transcript.mjs'
+import {
+  InputTranscriptAssembler,
+  streamingInputTranscript,
+} from './input-transcript.mjs'
 import { matchKeywordKnowledgeContext } from './keyword-knowledge-context.mjs'
 import {
   ensureResponseContext,
@@ -41,6 +44,8 @@ import { realtimeConnectionStatus } from './realtime-connection-status.mjs'
 import { SleepController } from './sleep-controller.mjs'
 import { createSpiritTaskClientFromEnvironment } from './spirit-task-direct.mjs'
 import { createSpiritVoiceNotifierFromEnvironment } from './spirit-voice-notifier.mjs'
+import { createAtomicRecordStore } from '../atomic/atomic-record-store.mjs'
+import { createAtomicSpaceProvider } from '../atomic/atomic-space-provider.mjs'
 import { createSherpaWakeWordDetector } from './wake-word/sherpa-detector.mjs'
 import {
   evaluateResponseGuards,
@@ -121,6 +126,8 @@ export function attachRealtimeGateway(server, {
   respondPermission,
   permissionPolicy,
   contextService = null,
+  atomicRecordStore = null,
+  atomicSpaceProvider = null,
 }) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 })
   const activeVoiceClients = new ActiveVoiceClients()
@@ -128,6 +135,13 @@ export function attachRealtimeGateway(server, {
   const spiritTaskClient = createSpiritTaskClientFromEnvironment()
   const spiritVoiceNotifier = createSpiritVoiceNotifierFromEnvironment({
     spiritTaskClient,
+  })
+  const resolvedAtomicRecordStore = atomicRecordStore || createAtomicRecordStore({
+    filePath: config.atomicRecordStorePath,
+  })
+  const resolvedAtomicSpaceProvider = atomicSpaceProvider || createAtomicSpaceProvider({
+    directory: config.atomicSpaceMockDir,
+    recordStore: resolvedAtomicRecordStore,
   })
 
   const broadcastVoiceOwnership = ownerId => {
@@ -174,6 +188,10 @@ export function attachRealtimeGateway(server, {
     let connectPromise
     let enterpriseContextPromise
     let pendingAudio = []
+    // A tool can finish while the realtime socket is reconnecting. Keep the
+    // business result durable in conversationSync and queue only the short
+    // spoken acknowledgement until a frontend is available again.
+    const pendingToolConfirmations = []
     let turnId = ''
     let turnGeneration = 0
     let turnSequence = 0
@@ -184,7 +202,7 @@ export function attachRealtimeGateway(server, {
     let outputEnabled = false
     let textOnlySession = false
     let activeKnowledge = null
-    const knowledgeTranscriptBuffers = new Map()
+    const inputTranscriptAssembler = new InputTranscriptAssembler()
     const knowledgeVoiceTurns = new Map()
     // Realtime front end for this session. Defaults to the configured provider
     // and can be switched by the client through the connect event.
@@ -218,6 +236,31 @@ export function attachRealtimeGateway(server, {
           || Promise.resolve(null)
       }
       return enterpriseContextPromise
+    }
+    const queueToolConfirmation = ({ content, turnId } = {}) => {
+      const text = String(content || '').trim()
+      if (!text) return
+      const duplicate = pendingToolConfirmations.some(item => (
+        item.turnId === turnId && item.content === text
+      ))
+      if (duplicate) return
+      pendingToolConfirmations.push({ content: text, turnId: turnId || null })
+      while (pendingToolConfirmations.length > 20) pendingToolConfirmations.shift()
+    }
+    const flushToolConfirmations = async () => {
+      if (!outputEnabled || !frontend?.ready || !pendingToolConfirmations.length) return
+      const pending = pendingToolConfirmations.splice(0)
+      for (const item of pending) {
+        const delivery = await frontend.speak(item.content, 'agent', {
+          turnId: item.turnId || committedTurnId || turnId,
+        })
+        // If the socket became unavailable again, keep the unsent item for the
+        // next reconnect instead of silently dropping it a second time.
+        if (delivery?.skipped || delivery?.failed || delivery?.timedOut) {
+          pendingToolConfirmations.unshift(item)
+          break
+        }
+      }
     }
     const rememberSpiritTaskOutput = output => {
       if (output?.source !== 'spirit-api-direct' || output?.status !== 'ok') return
@@ -496,8 +539,44 @@ export function attachRealtimeGateway(server, {
         ownerId,
         sessionId,
       }),
+      getRecordContext: () => conversationSync.recordContext({
+        ownerId,
+        sessionId,
+      }),
       getEnterpriseContext: loadEnterpriseContext,
       onTaskContextChanged: rememberSpiritTaskOutput,
+      onConversationMessage: message => {
+        conversationSync.record({
+          ownerId,
+          sessionId,
+          id: `voice:tool:${message.turnId || randomUUID()}:${message.content}`,
+          role: message.role || 'assistant',
+          content: message.content,
+          source: message.source || 'tool-result',
+          turnId: message.turnId || null,
+        })
+        frontend?.updateAgentContext({
+          recentMessages: conversationSync.frontendContext({ ownerId, sessionId }),
+        })
+      },
+      onRecordFact: ({ record, operation = 'created' } = {}) => {
+        conversationSync.recordRecordFact({
+          ownerId,
+          sessionId,
+          record,
+          operation,
+        })
+        frontend?.updateAgentContext({
+          recordContext: conversationSync.recordContext({ ownerId, sessionId }),
+        })
+      },
+      onRecordClarification: pending => {
+        conversationSync.setPendingRecord({ ownerId, sessionId, pending })
+        frontend?.updateAgentContext({
+          pendingRecordContext: conversationSync.pendingRecordContext({ ownerId, sessionId }),
+        })
+      },
+      onToolConfirmationPending: queueToolConfirmation,
       onMemoryChanged: () => frontend?.updateAgentContext({
         memories: memoryService?.list(ownerId, { limit: 64 }) || [],
       }),
@@ -526,6 +605,8 @@ export function attachRealtimeGateway(server, {
       },
       spiritTaskClient,
       spiritVoiceNotifier,
+      atomicRecordStore: resolvedAtomicRecordStore,
+      atomicSpaceProvider: resolvedAtomicSpaceProvider,
     })
     const currentTurn = () => ({
       turnId,
@@ -1101,6 +1182,7 @@ export function attachRealtimeGateway(server, {
           if (event.item_id) {
             inputTurns.invalidate(event.item_id)
           }
+          inputTranscriptAssembler.discard(stoppedTurn.turnId)
           send(ws, {
             type: 'transcript.discard',
             role: 'user',
@@ -1141,29 +1223,39 @@ export function attachRealtimeGateway(server, {
         || event.type === 'conversation.item.input_audio_transcription.text'
       ) {
         if (inputTurns.isInvalid(event.item_id)) return
-        const transcriptTurn = inputTurns.resolve(event.item_id, currentTurn())
+        const transcriptTurn = inputTurns.remember(
+          event.item_id,
+          inputTurns.resolve(event.item_id, currentTurn()),
+        )
         const transcript = streamingInputTranscript(event)
         if (!transcriptTurn?.turnId || !transcript) return
-        const previousKnowledgeText = knowledgeTranscriptBuffers.get(event.item_id) || ''
-        const accumulatedKnowledgeText = `${previousKnowledgeText}${transcript}`
-        knowledgeTranscriptBuffers.set(event.item_id, accumulatedKnowledgeText.slice(-500))
-        activateKnowledgeForText(accumulatedKnowledgeText, {
+        const accumulatedTranscript = inputTranscriptAssembler.update({
+          turnId: transcriptTurn.turnId,
+          itemId: event.item_id,
+          content: transcript,
+        })
+        activateKnowledgeForText(accumulatedTranscript.slice(-500), {
           turnId: transcriptTurn.turnId,
           source: 'voice-stream',
         })
         send(ws, {
           type: 'transcript.delta',
           role: 'user',
-          content: transcript,
+          content: accumulatedTranscript,
           turnId: transcriptTurn.turnId,
           replace: true,
         })
       } else if (event.type === 'conversation.item.input_audio_transcription.completed') {
+        inputTurns.remember(event.item_id, currentTurn())
         const completedInput = inputTurns.complete(event.item_id, currentTurn())
         const transcriptTurn = completedInput.context
         if (completedInput.invalid) return
-        const transcript = String(event.transcript || '').trim()
-        knowledgeTranscriptBuffers.delete(event.item_id)
+        const transcript = inputTranscriptAssembler.update({
+          turnId: transcriptTurn.turnId,
+          itemId: event.item_id,
+          content: event.transcript,
+          final: true,
+        })
         if (!transcript) {
           send(ws, {
             type: 'transcript.discard',
@@ -1198,6 +1290,7 @@ export function attachRealtimeGateway(server, {
         })
       } else if (event.type === 'conversation.item.input_audio_transcription.failed') {
         const failedInput = inputTurns.complete(event.item_id, currentTurn())
+        inputTranscriptAssembler.discard(failedInput.context?.turnId)
         send(ws, {
           type: 'transcript.discard',
           role: 'user',
@@ -1655,6 +1748,8 @@ export function attachRealtimeGateway(server, {
               memories: memoryService?.list(ownerId, { limit: 64 }) || [],
               recentMessages: conversationSync.frontendContext({ ownerId, sessionId }),
               taskContext: conversationSync.taskContext({ ownerId, sessionId }),
+              recordContext: conversationSync.recordContext({ ownerId, sessionId }),
+              pendingRecordContext: conversationSync.pendingRecordContext({ ownerId, sessionId }),
             },
             onEvent: handleEvent,
             onDiagnostic: diagnostic => {
@@ -1686,14 +1781,25 @@ export function attachRealtimeGateway(server, {
             reportFrontendError(error)
           }
             },
-            onClose: () => {
+            onClose: closeError => {
           if (frontend !== createdFrontend) return
+          const closeClassification = closeError
+            ? createdFrontend.provider.classifyError(closeError.message)
+            : 'other'
+          if (closeClassification === 'fatal') {
+            realtimeBlockedError = closeError.message
+            pendingAudio = []
+          }
           connectionLogger.warn('realtime.closed', {
             provider: createdFrontend.provider.key,
             connectedMs: realtimeConnectedAt
               ? Date.now() - realtimeConnectedAt
               : 0,
             blocked: Boolean(realtimeBlockedError),
+            ...(closeError ? {
+              classification: closeClassification,
+              error: closeError,
+            } : {}),
           })
           send(ws, { type: 'voice.state', state: 'idle' })
           frontend = null
@@ -1742,6 +1848,10 @@ export function attachRealtimeGateway(server, {
           pendingAudio.forEach(audio => createdFrontend.appendAudio(audio))
           pendingAudio = []
           if (outputEnabled) claimPendingNotifications()
+          flushToolConfirmations().catch(error => connectionLogger.warn(
+            'tool_confirmation.flush_failed',
+            { error },
+          ))
           send(ws, {
             type: 'voice.ready',
             inputSampleRate: createdFrontend.provider.inputSampleRate,
@@ -1759,6 +1869,10 @@ export function attachRealtimeGateway(server, {
             announcePendingPermissions()
             claimPendingNotifications()
             announcements.flush()
+            flushToolConfirmations().catch(error => connectionLogger.warn(
+              'tool_confirmation.flush_failed',
+              { error },
+            ))
           }
         })
         .catch(error => {
@@ -2177,7 +2291,13 @@ export function attachRealtimeGateway(server, {
                 changed: true,
               })
             }
-            return frontend.sendUserText(
+            const activeFrontend = frontend
+            if (!activeFrontend?.ready) {
+              throw new Error(
+                realtimeBlockedError || '实时语音前台当前不可用，请稍后再试。',
+              )
+            }
+            return activeFrontend.sendUserText(
               text,
               { turnId },
               {
@@ -2344,6 +2464,25 @@ export function attachRealtimeGateway(server, {
           tools: frontendTools({ toolProfile: config.voiceToolProfile })
             .map(tool => tool?.function?.name)
             .filter(name => String(name || '').startsWith('spirit_')),
+        },
+        atomicRecords: {
+          mode: 'local-file',
+          path: resolvedAtomicRecordStore.filePath,
+          tools: frontendTools({ toolProfile: config.voiceToolProfile })
+            .map(tool => tool?.function?.name)
+            .filter(name => String(name || '').startsWith('atomic_record_')),
+        },
+        atomicSpace: {
+          mode: 'mock-provider',
+          directory: resolvedAtomicSpaceProvider.directory,
+          operations: [
+            'get_index',
+            'search_instances',
+            'write_instance',
+            'query_instances',
+            'correct_instance',
+          ],
+          optionalOperations: ['get_meta_model'],
         },
       }
     },

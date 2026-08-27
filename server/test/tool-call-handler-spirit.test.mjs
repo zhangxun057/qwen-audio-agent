@@ -3,9 +3,11 @@ import test from 'node:test'
 import { ToolCallHandler } from '../src/voice/tools/tool-call-handler.mjs'
 
 function harness({ client = {}, notifier = null, transcript = '', enterpriseContext = {
-  subject: { userId: 'demo-user-hotel-10082', displayName: '张洵' },
-}, onTaskContextChanged = () => {} } = {}) {
+  subject: { userId: '2079697_hotel_10082', displayName: '张洵' },
+}, onTaskContextChanged = () => {}, directSpeech = false, taskNotificationWaitMs } = {}) {
   const outputs = []
+  const spoken = []
+  const messages = []
   const handler = new ToolCallHandler({
     taskManager: null,
     ownerId: 'owner-1',
@@ -14,20 +16,28 @@ function harness({ client = {}, notifier = null, transcript = '', enterpriseCont
     getEnterpriseContext: async () => enterpriseContext,
     getFrontend: () => ({
       sendFunctionOutput: async (...args) => outputs.push(args),
+      ...(directSpeech ? {
+        speak: async (...args) => {
+          spoken.push(args)
+          return { completed: true }
+        },
+      } : {}),
     }),
     getTurnId: () => 'turn-1',
     getTurnGeneration: () => 1,
     spiritTaskClient: client,
     spiritVoiceNotifier: notifier,
+    taskNotificationWaitMs,
     onTaskContextChanged,
+    onConversationMessage: message => messages.push(message),
   })
-  return { handler, outputs }
+  return { handler, outputs, spoken, messages }
 }
 
-test('creates a normalized floor-routed task and notifies the selected executor', async () => {
+test('creates a normalized floor-routed task and returns one combined notification receipt', async () => {
   let payload
   let notificationInput
-  const { handler, outputs } = harness({
+  const { handler, outputs, spoken, messages } = harness({
     client: {
       create: async value => {
         payload = value
@@ -41,6 +51,7 @@ test('creates a normalized floor-routed task and notifies the selected executor'
         return { status: 'sent', messageId: 'message-1' }
       },
     },
+    directSpeech: true,
   })
 
   await handler.createSpiritTask('call-1', 'turn-1', {
@@ -50,7 +61,7 @@ test('creates a normalized floor-routed task and notifies the selected executor'
   })
 
   assert.equal(payload.summary, '8201房送2瓶水')
-  assert.equal(payload.users[0].userId, 'demo-user-hotel-10082')
+  assert.equal(payload.users[0].userId, '2079697_hotel_10082')
   assert.equal(payload.users[0].userName, '张洵')
   assert.equal(payload.description, '8201 房间要求送两瓶水')
   assert.equal(payload.taskOpeningPrompt, '8201 房间要求送两瓶水')
@@ -60,6 +71,104 @@ test('creates a normalized floor-routed task and notifies the selected executor'
   assert.equal(notificationInput.recipientId, '2078987_hotel_10082')
   assert.equal(outputs[0][1].status, 'ok')
   assert.equal(outputs[0][1].notification.status, 'sent')
+  assert.equal(spoken.length, 1)
+  assert.equal(spoken[0][0], '已派给黄维维：8201房送2瓶水；通知已发送。')
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].content, '已派给黄维维：8201房送2瓶水；通知已发送。')
+})
+
+test('returns after the notification wait limit without a second acknowledgement', async () => {
+  const { handler, outputs, spoken, messages } = harness({
+    client: {
+      create: async () => ({ taskId: 'task-timeout' }),
+    },
+    notifier: {
+      configured: true,
+      notify: async () => new Promise(() => {}),
+    },
+    directSpeech: true,
+    taskNotificationWaitMs: 5,
+  })
+
+  await handler.createSpiritTask('call-timeout', 'turn-1', {
+    request: '8201 房间要求送两瓶水',
+    roomNumber: '8201',
+  })
+
+  assert.equal(outputs[0][1].status, 'ok')
+  assert.equal(outputs[0][1].notification.status, 'timeout')
+  assert.equal(spoken.length, 1)
+  assert.equal(spoken[0][0], '已派给黄维维：8201房送2瓶水；通知结果暂未确认。')
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].content, '已派给黄维维：8201房送2瓶水；通知结果暂未确认。')
+
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(spoken.length, 1)
+  assert.equal(messages.length, 1)
+})
+
+test('confirms a standalone notification with recipient and message content', async () => {
+  const { handler, outputs, spoken } = harness({
+    notifier: {
+      configured: true,
+      notify: async () => ({ status: 'sent', messageId: 'message-notify' }),
+    },
+    directSpeech: true,
+  })
+
+  await handler.notifySpiritUser('call-notify', 'turn-1', {
+    assigneeName: '吴镓松',
+    text: '明早八点到前台开会',
+  })
+
+  assert.equal(outputs[0][1].status, 'ok')
+  assert.equal(spoken[0][0], '已通知吴镓松：明早八点到前台开会。')
+})
+
+test('returns a single bounded receipt when a standalone notification times out', async () => {
+  const { handler, outputs, spoken, messages } = harness({
+    notifier: {
+      configured: true,
+      notify: async () => new Promise(() => {}),
+    },
+    directSpeech: true,
+    taskNotificationWaitMs: 5,
+  })
+
+  await handler.notifySpiritUser('call-notify-timeout', 'turn-1', {
+    assigneeName: '吴镓松',
+    text: '明早八点到前台开会',
+  })
+
+  assert.equal(outputs[0][1].status, 'ok')
+  assert.equal(outputs[0][1].notification.status, 'timeout')
+  assert.equal(spoken.length, 1)
+  assert.equal(messages.length, 1)
+  assert.equal(spoken[0][0], '已向吴镓松发起通知：明早八点到前台开会；结果暂未确认。')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(spoken.length, 1)
+})
+
+test('does not require a preloaded room card when dispatching a 1501 task', async () => {
+  let payload
+  const { handler, outputs } = harness({
+    client: {
+      create: async value => {
+        payload = value
+        return { taskId: 'task-1501' }
+      },
+    },
+    notifier: { configured: false },
+  })
+
+  await handler.createSpiritTask('call-1501', 'turn-1', {
+    request: '1501房借一个充电宝',
+    roomNumber: '1501',
+  })
+
+  assert.equal(payload.summary, '1501房借1个充电宝')
+  assert.equal(payload.users[1].userName, '黄维维')
+  assert.equal(outputs[0][1].status, 'ok')
 })
 
 test('resolves “给我自己” from the trusted login identity', async () => {
@@ -79,8 +188,8 @@ test('resolves “给我自己” from the trusted login identity', async () => 
     assigneeName: '我自己',
   })
 
-  assert.equal(payload.users[0].userId, 'demo-user-hotel-10082')
-  assert.equal(payload.users[1].userId, 'demo-user-hotel-10082')
+  assert.equal(payload.users[0].userId, '2079697_hotel_10082')
+  assert.equal(payload.users[1].userId, '2079697_hotel_10082')
   assert.equal(payload.users[1].userName, '张洵')
   assert.equal(outputs[0][1].status, 'ok')
 })
@@ -369,6 +478,27 @@ test('notifies the new executor immediately after reassignment', async () => {
   assert.equal(notificationInput.title, '工作通知')
   assert.equal(outputs[0][1].notification.status, 'sent')
   assert.equal(outputs[0][2].taskId, 'task-401')
+})
+
+test('bounds lifecycle notification waits as well as task creation waits', async () => {
+  const { handler, outputs } = harness({
+    client: {
+      update: async () => ({ updated: true }),
+    },
+    notifier: {
+      configured: true,
+      notify: async () => new Promise(() => {}),
+    },
+    taskNotificationWaitMs: 5,
+  })
+
+  await handler.updateSpiritTask('call-reassign-timeout', 'turn-1', {
+    taskId: 'task-401',
+    assigneeName: '吴镓松',
+  })
+
+  assert.equal(outputs[0][1].action, 'updated')
+  assert.equal(outputs[0][1].notification.status, 'timeout')
 })
 
 test('starts and completes tasks through the dedicated lifecycle endpoints', async () => {

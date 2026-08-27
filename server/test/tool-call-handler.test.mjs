@@ -19,13 +19,27 @@ function harness({
   clientContext = {},
   requestClientState,
   getTurnId = () => 'turn-one',
+  atomicRecordStore = null,
+  atomicSpaceProvider = null,
+  getEnterpriseContext = async () => null,
+  getRecordContext = () => [],
+  onRecordFact = () => {},
+  onRecordClarification = () => {},
+  directSpeech = false,
 } = {}) {
   const outputs = []
+  const spoken = []
   const ensuredResponses = []
   const transcripts = new TurnTranscripts({ waitMs: 5 })
   const frontend = {
     sendFunctionOutput: async (...args) => outputs.push(args),
     ensureResponse: async (...args) => ensuredResponses.push(args),
+    ...(directSpeech ? {
+      speak: async (...args) => {
+        spoken.push(args)
+        return { completed: true }
+      },
+    } : {}),
   }
   const handler = new ToolCallHandler({
     taskManager: manager,
@@ -47,11 +61,17 @@ function harness({
     onPermissionDeliveryFailed,
     getClientContext: () => clientContext,
     requestClientState,
+    atomicRecordStore,
+    atomicSpaceProvider,
+    getEnterpriseContext,
+    getRecordContext,
+    onRecordFact,
+    onRecordClarification,
     getConversationContext: () => [
       { role: 'user', content: '之前在改首页' },
     ],
   })
-  return { outputs, ensuredResponses, manager, transcripts, handler }
+  return { outputs, spoken, ensuredResponses, manager, transcripts, handler }
 }
 
 test('asks a capable client to enter sleep without creating another response', async () => {
@@ -82,6 +102,398 @@ test('rejects sleep when the client did not advertise that state', async () => {
   }, { turnId: 'turn-one', turnGeneration: 1 })
 
   assert.equal(kit.outputs[0][1].error_code, 'unsupported_client_state')
+})
+
+test('keeps task mutation and event write mutually exclusive within one turn', () => {
+  const kit = harness()
+  assert.equal(kit.handler.claimTurnOperation('turn-exclusive', 'task'), true)
+  assert.equal(kit.handler.claimTurnOperation('turn-exclusive', 'event'), false)
+  assert.equal(kit.handler.claimTurnOperation('turn-exclusive', 'task'), true)
+})
+
+test('keeps atomic write repair technical details inside the model loop', async () => {
+  const atomicSpaceProvider = {
+    writeInstance: async () => {
+      throw new Error('category 字段不符合内部规则')
+    },
+  }
+  const kit = harness({
+    atomicRecordStore: {},
+    atomicSpaceProvider,
+  })
+  kit.transcripts.record('turn-one', '2015房我刚才送了两瓶水')
+
+  const call = {
+    name: 'atomic_record_write',
+    arguments: JSON.stringify({
+      category: '物品',
+      factState: 'occurred',
+      content: '2015房已送入矿泉水2瓶',
+    }),
+  }
+  await kit.handler.handle({ call_id: 'atomic-fail-1', ...call }, {
+    turnId: 'turn-one',
+    turnGeneration: 1,
+  })
+  await kit.handler.handle({ call_id: 'atomic-fail-2', ...call }, {
+    turnId: 'turn-one',
+    turnGeneration: 1,
+  })
+
+  assert.equal(kit.outputs[0][1].retryable, true)
+  assert.match(kit.outputs[0][1].internal_reason, /category 字段/u)
+  assert.doesNotMatch(kit.outputs[0][1].user_message, /category|字段/u)
+  assert.match(kit.outputs[0][3].response.instructions, /不要对用户说话/u)
+  assert.match(kit.outputs[0][3].response.instructions, /立即重试一次/u)
+  assert.equal(kit.outputs[1][1].retryable, false)
+  assert.match(kit.outputs[1][3].response.instructions, /不再重试/u)
+  assert.match(kit.outputs[1][3].response.instructions, /这条暂时没有记成/u)
+})
+
+test('injects the logged-in actor and original voice text into atomic writes', async () => {
+  let received
+  const atomicSpaceProvider = {
+    writeInstance: async input => {
+      received = input
+      return {
+        action: 'created',
+        record: { recordId: 'record-one', summary: '2015房已送入矿泉水2瓶' },
+      }
+    },
+  }
+  const kit = harness({
+    atomicRecordStore: {},
+    atomicSpaceProvider,
+    getEnterpriseContext: async () => ({
+      subject: { userId: 'employee:zhang-xun', displayName: '张洵' },
+    }),
+  })
+  kit.transcripts.record('turn-one', '2015房间我刚才送了两瓶水')
+  await kit.handler.handle({
+    call_id: 'atomic-success',
+    name: 'atomic_record_write',
+    arguments: JSON.stringify({
+      category: '物品',
+      factState: 'occurred',
+      action: '送出',
+      content: '2015房已送入矿泉水2瓶',
+      sourceTrigger: 'task_transition',
+      sourceTaskId: 'model-forged-task',
+      rawText: '模型伪造的原话',
+      actors: { performedBy: { id: 'model-forged-actor' } },
+    }),
+  }, { turnId: 'turn-one', turnGeneration: 1 })
+
+  assert.equal(received.context.actorId, 'employee:zhang-xun')
+  assert.equal(received.context.actorName, '张洵')
+  assert.equal(received.input.sourceTrigger, 'user_turn')
+  assert.equal(received.input.rawText, '2015房间我刚才送了两瓶水')
+  assert.equal(received.input.sourceTaskId, undefined)
+  assert.equal(received.input.actors, undefined)
+  assert.match(received.input.idempotencyKey, /^voice:owner:turn-one$/)
+})
+
+test('drops malformed optional event data without discarding valid facts', async () => {
+  const received = []
+  const atomicSpaceProvider = {
+    writeInstance: async input => {
+      received.push(input.input)
+      if (input.input.entities) throw new Error('实体格式不正确')
+      return {
+        action: 'created',
+        record: { recordId: 'record-minimum', summary: input.input.content },
+      }
+    },
+  }
+  const kit = harness({
+    atomicRecordStore: {},
+    atomicSpaceProvider,
+  })
+  kit.transcripts.record('turn-one', '18楼电梯门口捡到一双皮鞋')
+  await kit.handler.handle({
+    call_id: 'atomic-minimum',
+    name: 'atomic_record_write',
+    arguments: JSON.stringify({
+      category: '物品',
+      factState: 'occurred',
+      content: '18楼电梯门口拾获一双皮鞋',
+      facts: { itemName: '皮鞋' },
+      entities: [{ type: 'not-an-entity', id: '18楼' }],
+    }),
+  }, { turnId: 'turn-one', turnGeneration: 1 })
+
+  assert.equal(received.length, 2)
+  assert.deepEqual(received[1], {
+    category: '物品',
+    content: '18楼电梯门口拾获一双皮鞋',
+    facts: { itemName: '皮鞋' },
+    sourceTrigger: 'user_turn',
+    rawText: '18楼电梯门口捡到一双皮鞋',
+    idempotencyKey: 'voice:owner:turn-one',
+  })
+  assert.equal(kit.outputs[0][1].status, 'ok')
+})
+
+test('keeps valid entities and occurrence time when one optional entity is malformed', async () => {
+  const received = []
+  const atomicSpaceProvider = {
+    writeInstance: async input => {
+      received.push(input.input)
+      if (input.input.entities?.some(entity => entity.type === 'not-an-entity')) {
+        throw new Error('实体格式不正确')
+      }
+      return {
+        action: 'created',
+        record: { recordId: 'record-partial', summary: input.input.content },
+      }
+    },
+  }
+  const kit = harness({ atomicRecordStore: {}, atomicSpaceProvider })
+  kit.transcripts.record('turn-one', '2015房刚送了两瓶水')
+
+  await kit.handler.handle({
+    call_id: 'atomic-partial',
+    name: 'atomic_record_write',
+    arguments: JSON.stringify({
+      category: '物品',
+      factState: 'occurred',
+      action: '送出',
+      content: '2015房已送入矿泉水2瓶',
+      occurredAt: '2026-08-26T10:00:00+08:00',
+      facts: { itemName: '矿泉水', quantity: 2, unit: '瓶' },
+      entities: [
+        { type: 'room', id: '2015房' },
+        { type: 'item', id: '矿泉水' },
+        { type: 'not-an-entity', id: '错误对象' },
+      ],
+    }),
+  }, { turnId: 'turn-one', turnGeneration: 1 })
+
+  assert.equal(received.length, 2)
+  assert.deepEqual(received[1].entities, [
+    { type: 'room', id: '2015房' },
+    { type: 'item', id: '矿泉水' },
+  ])
+  assert.deepEqual(received[1].facts, { itemName: '矿泉水', quantity: 2, unit: '瓶' })
+  assert.equal(received[1].occurredAt, '2026-08-26T10:00:00+08:00')
+  assert.equal(kit.outputs[0][1].status, 'ok')
+})
+
+test('uses a deterministic Gateway acknowledgement after an atomic write', async () => {
+  const atomicSpaceProvider = {
+    writeInstance: async () => ({
+      action: 'created',
+      record: {
+        recordId: 'record-voice',
+        action: '借出',
+        content: '801房已借出矿泉水2瓶',
+        facts: { itemName: '矿泉水', quantity: 2, unit: '瓶' },
+        entities: [
+          { type: 'room', id: 'room:801' },
+          { type: 'item', id: 'item:mineral-water' },
+        ],
+      },
+    }),
+  }
+  const kit = harness({ atomicSpaceProvider, directSpeech: true })
+  kit.transcripts.record('turn-one', '801房借出两瓶矿泉水')
+  await kit.handler.handle({
+    call_id: 'atomic-spoken',
+    name: 'atomic_record_write',
+    arguments: JSON.stringify({
+      category: '物品',
+      factState: 'occurred',
+      action: '借出',
+      content: '801房已借出矿泉水2瓶',
+      facts: { itemName: '矿泉水', quantity: 2, unit: '瓶' },
+      entities: [
+        { type: 'room', id: 'room:801' },
+        { type: 'item', id: 'item:mineral-water' },
+      ],
+    }),
+  }, { turnId: 'turn-one', turnGeneration: 1 })
+  assert.equal(kit.outputs[0][1].status, 'ok')
+  assert.equal(kit.spoken[0][0], '已记录：801房，借出矿泉水2瓶。')
+})
+
+test('asks only for a missing loan target and does not save a partial record', async () => {
+  let writes = 0
+  const pending = []
+  const error = new Error('借出缺少必要业务信息')
+  error.code = 'ATOMIC_EVENT_REQUIREMENTS_MISSING'
+  error.action = '借出'
+  error.missingFacts = []
+  error.anyEntityTypes = ['room', 'stay', 'guest', 'employee']
+  error.clarificationGuidance = '还需要知道借给谁'
+  error.entityHints = ['房号', '客人姓名', '员工姓名']
+  const kit = harness({
+    atomicSpaceProvider: {
+      writeInstance: async () => {
+        writes += 1
+        throw error
+      },
+    },
+    onRecordClarification: value => pending.push(value),
+  })
+  kit.transcripts.record('turn-one', '我刚才借出了一把雨伞')
+
+  await kit.handler.handle({
+    call_id: 'atomic-loan-missing-target',
+    name: 'atomic_record_write',
+    arguments: JSON.stringify({
+      category: '物品',
+      factState: 'occurred',
+      action: '借出',
+      content: '已借出雨伞1把',
+      facts: { itemName: '雨伞', quantity: 1, unit: '把' },
+    }),
+  }, { turnId: 'turn-one', turnGeneration: 1 })
+
+  assert.equal(writes, 1)
+  assert.equal(kit.outputs[0][1].status, 'failed')
+  assert.equal(kit.outputs[0][1].error_code, 'atomic_record_needs_clarification')
+  assert.equal(kit.outputs[0][1].user_message, '这条事实还需要补充一项关键信息，暂未写入。')
+  assert.match(kit.outputs[0][3].response.instructions, /根据上下文自己组织一句自然追问/u)
+  assert.match(kit.outputs[0][3].response.instructions, /不得照抄固定模板/u)
+  assert.doesNotMatch(kit.outputs[0][3].response.instructions, /借给哪个房间、哪位客人或哪位员工？/u)
+  assert.match(kit.outputs[0][3].response.instructions, /不要说字段、类型、代码、ID、接口、校验或系统规则/u)
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0].input.content, '已借出雨伞1把')
+  assert.deepEqual(pending[0].entityHints, ['房号', '客人姓名', '员工姓名'])
+})
+
+test('releases the event choice when the model has not classified plan versus fact', async () => {
+  const kit = harness({
+    atomicRecordStore: {},
+    getTurnId: () => 'turn-plan',
+  })
+
+  await kit.handler.handle({
+    call_id: 'atomic-without-time-state',
+    name: 'atomic_record_write',
+    arguments: JSON.stringify({
+      category: '客人',
+      action: '预留',
+      content: '明天给客人预留S01停车位',
+    }),
+  }, { turnId: 'turn-plan', turnGeneration: 1 })
+
+  assert.equal(kit.outputs[0][1].error_code, 'atomic_record_fact_state_required')
+  assert.match(kit.outputs[0][3].response.instructions, /仍待执行/u)
+  assert.equal(kit.handler.claimTurnOperation('turn-plan', 'task'), true)
+})
+
+test('changes today to tomorrow on the most recent saved record without another confirmation', async () => {
+  let correctionInput
+  const facts = []
+  const original = '今天入住的客人张先生要求早上11点去机场T3航站楼接机，航班号为C181。'
+  const corrected = '明天入住的客人张先生要求早上11点去机场T3航站楼接机，航班号为C181。'
+  const kit = harness({
+    getRecordContext: () => [{
+      recordId: 'record-c181',
+      summary: original,
+      category: '客人',
+      action: '要求',
+    }],
+    atomicSpaceProvider: {
+      correctInstance: async input => {
+        correctionInput = input
+        return {
+          action: 'updated',
+          record: {
+            recordId: input.recordId,
+            category: '客人',
+            action: '要求',
+            content: input.patch.content,
+            facts: { guestName: '张先生', request: '早上11点去机场T3航站楼接机', flightNumber: 'C181' },
+            entities: [],
+          },
+        }
+      },
+    },
+    onRecordFact: fact => facts.push(fact),
+    directSpeech: true,
+  })
+  kit.transcripts.record('turn-one', '你记错了，是明天。')
+
+  await kit.handler.handle({
+    call_id: 'correct-tomorrow',
+    name: 'atomic_record_correct',
+    arguments: JSON.stringify({ action: 'update', reference: '刚才那条' }),
+  }, { turnId: 'turn-one', turnGeneration: 1 })
+
+  assert.equal(correctionInput.recordId, 'record-c181')
+  assert.equal(correctionInput.patch.content, corrected)
+  assert.equal(kit.outputs[0][1].status, 'ok')
+  assert.equal(kit.spoken.length, 1)
+  assert.equal(kit.spoken[0][0], `已修改：${corrected}`)
+  assert.equal(facts.length, 1)
+  assert.equal(facts[0].record.content, corrected)
+})
+
+test('applies supplied correction changes even when the current answer is only an acknowledgement', async () => {
+  let correctionInput
+  const kit = harness({
+    getRecordContext: () => [{ recordId: 'record-801', summary: '1015房电话投诉空调坏了' }],
+    atomicSpaceProvider: {
+      correctInstance: async input => {
+        correctionInput = input
+        return {
+          action: 'updated',
+          record: {
+            recordId: input.recordId,
+            category: '客人',
+            action: '投诉',
+            content: input.patch.content,
+            entities: [{ type: 'room', id: 'room:801' }],
+          },
+        }
+      },
+    },
+  })
+  kit.transcripts.record('turn-one', '对的。')
+
+  await kit.handler.handle({
+    call_id: 'correct-supplied',
+    name: 'atomic_record_correct',
+    arguments: JSON.stringify({
+      action: 'update',
+      reference: '刚才那条',
+      changes: {
+        content: '801房电话投诉空调坏了',
+        entities: [{ type: 'room', id: 'room:801' }],
+      },
+    }),
+  }, { turnId: 'turn-one', turnGeneration: 1 })
+
+  assert.equal(correctionInput.recordId, 'record-801')
+  assert.equal(correctionInput.patch.content, '801房电话投诉空调坏了')
+  assert.deepEqual(correctionInput.patch.entities, [{ type: 'room', id: 'room:801' }])
+  assert.equal(kit.outputs[0][1].status, 'ok')
+})
+
+test('does not delete an atomic record unless the current turn explicitly says delete', async () => {
+  let corrections = 0
+  const kit = harness({
+    getRecordContext: () => [{ recordId: 'record-keep', summary: '801房电话投诉空调坏了' }],
+    atomicSpaceProvider: {
+      correctInstance: async () => {
+        corrections += 1
+        return { action: 'deleted', record: { recordId: 'record-keep' } }
+      },
+    },
+  })
+  kit.transcripts.record('turn-one', '对的。')
+
+  await kit.handler.handle({
+    call_id: 'delete-without-explicit-request',
+    name: 'atomic_record_correct',
+    arguments: JSON.stringify({ action: 'delete', reference: '刚才那条' }),
+  }, { turnId: 'turn-one', turnGeneration: 1 })
+
+  assert.equal(corrections, 0)
+  assert.equal(kit.outputs[0][1].status, 'failed')
+  assert.equal(kit.outputs[0][1].error_code, 'atomic_record_correction_failed')
 })
 
 async function permissionHarness({

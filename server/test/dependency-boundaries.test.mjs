@@ -8,14 +8,15 @@ const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../src')
 const projectRoot = resolve(sourceRoot, '../..')
 const sharedRoot = resolve(sourceRoot, '../../shared')
 const allowedDependencies = {
-  app: new Set(['agent', 'app', 'context', 'conversation', 'core', 'task', 'voice']),
+  app: new Set(['agent', 'app', 'atomic', 'context', 'conversation', 'core', 'task', 'voice']),
+  atomic: new Set(['atomic', 'core', 'shared']),
   context: new Set(['context', 'core', 'shared']),
   process: new Set(['process', 'shared']),
   core: new Set(['core', 'shared']),
   agent: new Set(['agent', 'core', 'shared']),
   conversation: new Set(['conversation', 'core']),
   task: new Set(['agent', 'core', 'task']),
-  voice: new Set(['conversation', 'core', 'shared', 'task', 'voice']),
+  voice: new Set(['atomic', 'conversation', 'core', 'shared', 'task', 'voice']),
 }
 
 function sourceFiles(directory) {

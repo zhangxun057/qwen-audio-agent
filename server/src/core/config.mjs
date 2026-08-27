@@ -187,7 +187,7 @@ export const config = {
   ).trim(),
   contextUserId: String(
     process.env.QWEN_AUDIO_CONTEXT_USER_ID
-    || (voiceToolProfile === 'hotel-direct' ? 'demo-user-hotel-10082' : ''),
+    || (voiceToolProfile === 'hotel-direct' ? '2079697_hotel_10082' : ''),
   ).trim(),
   contextServiceUrl: String(
     process.env.QWEN_AUDIO_CONTEXT_SERVICE_URL || '',
@@ -429,6 +429,15 @@ export const config = {
   taskStatePath: process.env.QWEN_AUDIO_AGENT_TASK_STATE_PATH
     ? resolve(root, process.env.QWEN_AUDIO_AGENT_TASK_STATE_PATH)
     : runtimeEnvironment.taskStatePath,
+  // 本地原子记录仓储。它只决定当前存储介质，工具契约与未来云端记录 API 保持一致。
+  atomicRecordStorePath: process.env.QWEN_AUDIO_ATOMIC_RECORD_STORE_PATH
+    ? resolve(root, process.env.QWEN_AUDIO_ATOMIC_RECORD_STORE_PATH)
+    : resolve(runtimeEnvironment.configDirectory, 'atomic-records.json'),
+  // Local replacement for the Atomic Space MCP. The Gateway only depends on
+  // the provider interface, so production can swap this directory for MCP.
+  atomicSpaceMockDir: process.env.QWEN_AUDIO_ATOMIC_SPACE_MOCK_DIR
+    ? resolve(root, process.env.QWEN_AUDIO_ATOMIC_SPACE_MOCK_DIR)
+    : resolve(root, 'config/hotel-direct/atomic-space-mock'),
   backendSessionStatePath: process.env.QWEN_AUDIO_AGENT_BACKEND_SESSION_STATE_PATH
     ? resolve(root, process.env.QWEN_AUDIO_AGENT_BACKEND_SESSION_STATE_PATH)
     : resolve(runtimeEnvironment.configDirectory, 'state/acp-sessions.json'),

@@ -4,6 +4,7 @@ import {
   frontendTools,
   resultResponseInstructions,
   speakResponseInstructions,
+  verbatimSpeakResponseInstructions,
   permissionResponseInstructions,
 } from '../frontend-tools.mjs'
 import { gaRealtimeProtocol } from './ga-protocol.mjs'
@@ -99,10 +100,12 @@ export const s2sProvider = {
     }
   },
 
-  buildSpeakResponse: (content, { textOnly = false } = {}) => ({
+  buildSpeakResponse: (content, { textOnly = false, verbatim = false } = {}) => ({
     conversation: 'none',
     modalities: textOnly ? ['text'] : ['audio'],
-    instructions: speakResponseInstructions(content),
+    instructions: verbatim
+      ? verbatimSpeakResponseInstructions(content)
+      : speakResponseInstructions(content),
     tool_choice: 'none',
   }),
 

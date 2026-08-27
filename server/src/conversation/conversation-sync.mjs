@@ -1,3 +1,5 @@
+import { projectRecordFact } from './record-presentation.mjs'
+
 function sessionKey(ownerId, sessionId) {
   return `${ownerId}\u0000${sessionId}`
 }
@@ -64,6 +66,8 @@ export class ConversationSync {
         messages: [],
         byId: new Map(),
         taskFacts: new Map(),
+        recordFacts: new Map(),
+        pendingRecord: null,
         lastAccessedAt: Date.now(),
       }
       this.sessions.set(key, state)
@@ -182,6 +186,96 @@ export class ConversationSync {
     return state.taskFacts.delete(clean(taskId))
   }
 
+  recordRecordFact({
+    ownerId,
+    sessionId,
+    record,
+    operation = 'created',
+  } = {}) {
+    const fact = projectRecordFact(record, operation)
+    if (!fact.recordId) return null
+    const state = this.state(ownerId, sessionId)
+    state.recordFacts ||= new Map()
+    if (fact.operation === 'deleted') {
+      state.recordFacts.delete(fact.recordId)
+      return fact
+    }
+    state.recordFacts.set(fact.recordId, {
+      ...fact,
+      updatedAt: Date.now(),
+    })
+    while (state.recordFacts.size > 8) {
+      const oldest = [...state.recordFacts.entries()]
+        .sort((a, b) => a[1].updatedAt - b[1].updatedAt)[0]
+      if (!oldest) break
+      state.recordFacts.delete(oldest[0])
+    }
+    return { ...state.recordFacts.get(fact.recordId) }
+  }
+
+  recordContext({ ownerId, sessionId } = {}) {
+    const state = this.peek(ownerId, sessionId)
+    if (!state) return []
+    state.recordFacts ||= new Map()
+    return [...(state?.recordFacts?.values() || [])]
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map(fact => ({ ...fact }))
+  }
+
+  setPendingRecord({ ownerId, sessionId, pending } = {}) {
+    const state = this.state(ownerId, sessionId)
+    if (!pending) {
+      state.pendingRecord = null
+      return null
+    }
+    const input = pending.input && typeof pending.input === 'object'
+      ? pending.input
+      : {}
+    const facts = input.facts && typeof input.facts === 'object' && !Array.isArray(input.facts)
+      ? Object.fromEntries(Object.entries(input.facts).slice(0, 24))
+      : {}
+    const entities = Array.isArray(input.entities)
+      ? input.entities.slice(0, 16).map(entity => ({
+          type: clean(entity?.type).slice(0, 40),
+          id: clean(entity?.id || entity?.mention || entity?.name).slice(0, 160),
+          role: clean(entity?.role).slice(0, 80),
+        })).filter(entity => entity.type && entity.id)
+      : []
+    state.pendingRecord = {
+      category: clean(input.category).slice(0, 40),
+      action: clean(input.action).slice(0, 80),
+      content: clean(input.content).slice(0, 500),
+      facts,
+      entities,
+      missingFacts: Array.isArray(pending.missingFacts)
+        ? pending.missingFacts.map(clean).filter(Boolean).slice(0, 16)
+        : [],
+      anyEntityTypes: Array.isArray(pending.anyEntityTypes)
+        ? pending.anyEntityTypes.map(clean).filter(Boolean).slice(0, 16)
+        : [],
+      anyEntityRoles: Array.isArray(pending.anyEntityRoles)
+        ? pending.anyEntityRoles.map(clean).filter(Boolean).slice(0, 16)
+        : [],
+      guidance: clean(pending.guidance).slice(0, 500),
+      entityHints: Array.isArray(pending.entityHints)
+        ? pending.entityHints.map(clean).filter(Boolean).slice(0, 12)
+        : [],
+      updatedAt: Date.now(),
+    }
+    return { ...state.pendingRecord }
+  }
+
+  pendingRecordContext({ ownerId, sessionId, maxAgeMs = 15 * 60 * 1000 } = {}) {
+    const state = this.peek(ownerId, sessionId)
+    const pending = state?.pendingRecord
+    if (!pending) return null
+    if (Date.now() - pending.updatedAt > maxAgeMs) {
+      state.pendingRecord = null
+      return null
+    }
+    return structuredClone(pending)
+  }
+
   taskContext({ ownerId, sessionId } = {}) {
     const state = this.peek(ownerId, sessionId)
     return [...(state?.taskFacts?.values() || [])]
@@ -218,6 +312,7 @@ export class ConversationSync {
         'voice-user',
         'text-user',
         'realtime-direct',
+        'tool-result',
         'agent-presentation',
       ].includes(message.source)
       || (

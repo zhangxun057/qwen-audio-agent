@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "instances": [
+    {
+      "type": "guest",
+      "id": "guest:zhang-xian-sheng",
+      "name": "张先生",
+      "aliases": ["张先生", "张某"]
+    },
+    {
+      "type": "stay",
+      "id": "stay:20260825-zhang",
+      "name": "张先生 2026-08-25 住店记录",
+      "aliases": ["本次住店", "当前住店", "张先生住店"],
+      "guestId": "guest:zhang-xian-sheng",
+      "orderId": "order:20260825-zhang",
+      "roomId": "room:2615",
+      "roomHistory": [
+        {
+          "roomId": "room:2615",
+          "from": "2026-08-25T15:00:00+08:00",
+          "to": null
+        }
+      ],
+      "status": "in_house"
+    },
+    {
+      "type": "order",
+      "id": "order:20260825-zhang",
+      "name": "张先生 2026-08-25 住宿订单",
+      "aliases": ["本次订单", "当前订单"],
+      "stayId": "stay:20260825-zhang",
+      "guestId": "guest:zhang-xian-sheng",
+      "orderNo": "DEMO-0825-ZHANG",
+      "status": "open"
+    }
+  ]
+}

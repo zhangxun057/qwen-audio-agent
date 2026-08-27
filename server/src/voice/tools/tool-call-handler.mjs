@@ -19,6 +19,9 @@ import {
   SPIRIT_TASK_ADD_COMMENT_TOOL_NAME,
   SPIRIT_TASK_DELETE_TOOL_NAME,
   SPIRIT_VOICE_NOTIFY_TOOL_NAME,
+  ATOMIC_RECORD_WRITE_TOOL_NAME,
+  ATOMIC_RECORD_QUERY_TOOL_NAME,
+  ATOMIC_RECORD_CORRECT_TOOL_NAME,
 } from '../realtime-provider.mjs'
 import { currentTimeSnapshot } from '../../conversation/frontend-agent-context.mjs'
 import { canonicalScope, isMemoryDocument } from '../../core/memory-scopes.mjs'
@@ -34,8 +37,11 @@ import {
   SPIRIT_TASK_RECORD_SOURCES,
   SPIRIT_TASK_STATUSES,
 } from '../spirit-task-direct.mjs'
+import { buildRecordVoiceConfirmation } from '../../conversation/record-presentation.mjs'
 
 const SENSITIVE_MEMORY = /(?:pass(?:word)?|secret|api[_ -]?key|access[_ -]?token|credential|验证码|密码|密钥|令牌|\bsk-[a-z0-9_-]+)/i
+const TASK_NOTIFICATION_WAIT_MS = 5_000
+const ATOMIC_FACT_STATES = new Set(['occurred', 'confirmed_arrangement'])
 
 function failure(errorCode, userMessage, {
   retryable = false,
@@ -50,6 +56,201 @@ function failure(errorCode, userMessage, {
     retryable,
     ...details,
   }
+}
+
+const ATOMIC_RECORD_BUSINESS_FIELDS = Object.freeze([
+  'category',
+  'action',
+  'content',
+  'facts',
+  'entities',
+  'occurredAt',
+  'details',
+  'status',
+])
+
+const ATOMIC_RECORD_CATEGORIES = new Set([
+  '物品',
+  '客人',
+  '酒店',
+  '其他',
+  // Historical model outputs remain readable during the migration.
+  '住客',
+  '酒店运行',
+])
+
+const ATOMIC_ENTITY_TYPES = new Set([
+  'room',
+  'stay',
+  'guest',
+  'order',
+  'task',
+  'item',
+  'service',
+  'operation',
+  'employee',
+  'location',
+])
+
+function atomicBusinessInput(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value)
+    ? value
+    : {}
+  return Object.fromEntries(
+    ATOMIC_RECORD_BUSINESS_FIELDS
+      .filter(field => Object.hasOwn(source, field))
+      .map(field => [field, source[field]]),
+  )
+}
+
+function atomicMinimumInput(value) {
+  const source = atomicBusinessInput(value)
+  const content = typeof source.content === 'string' ? source.content.trim() : ''
+  if (!content) return null
+  const category = typeof source.category === 'string' ? source.category.trim() : ''
+  return {
+    // A malformed category must not turn an otherwise complete fact into a
+    // failed voice interaction. "其他" is deliberately the open fallback.
+    category: ATOMIC_RECORD_CATEGORIES.has(category)
+      ? category
+      : '其他',
+    content,
+  }
+}
+
+function speechFragment(value) {
+  return String(value || '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .replace(/[。！？!?；;]+$/u, '')
+}
+
+function taskDispatchConfirmation({ summary, assigneeName, notificationStatus, selfTest = false }) {
+  const task = speechFragment(summary) || '这项任务'
+  const assignee = speechFragment(assigneeName) || '执行人'
+  const base = selfTest
+    ? `已创建自测任务，执行人${assignee}：${task}`
+    : `已派给${assignee}：${task}`
+  if (selfTest || notificationStatus === 'disabled') return `${base}；按要求不发送通知。`
+  if (notificationStatus === 'sent') return `${base}；通知已发送。`
+  if (notificationStatus === 'skipped_by_gate') return `${base}；接收人关闭了通知。`
+  if (notificationStatus === 'timeout') return `${base}；通知结果暂未确认。`
+  if (notificationStatus === 'not_configured') return `${base}；通知未配置。`
+  if (notificationStatus === 'not_available') return `${base}；通知未发送。`
+  return `${base}；通知发送失败。`
+}
+
+function notificationConfirmation({ recipientName, content, status }) {
+  const recipient = speechFragment(recipientName) || '接收人'
+  const message = speechFragment(content) || '这条消息'
+  if (status === 'sent') return `已通知${recipient}：${message}。`
+  if (status === 'skipped_by_gate') return `${recipient}关闭了通知，未发送：${message}。`
+  if (status === 'timeout') return `已向${recipient}发起通知：${message}；结果暂未确认。`
+  return `未能通知${recipient}：${message}。`
+}
+
+async function settleWithTimeout(promise, timeoutMs) {
+  let timer
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => resolve({
+      status: 'timeout',
+      timeoutMs,
+    }), timeoutMs)
+  })
+  try {
+    return await Promise.race([promise, timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function correctionTargetWord(transcript) {
+  const source = String(transcript || '').trim()
+  if (!/(?:改|更正|纠正|记错|不是)/u.test(source)) return ''
+  return [...source.matchAll(/今天|明天|后天|昨天|前天/gu)].at(-1)?.[0] || ''
+}
+
+function deriveCorrectionChanges(current, transcript) {
+  if (!current || !transcript) return {}
+  const source = String(current.content || current.summary || '').trim()
+  if (!source) return {}
+  const targetWord = correctionTargetWord(transcript)
+  if (targetWord) {
+    const dateWords = /今天|明天|后天|昨天|前天/gu
+    const replacement = source.replace(dateWords, targetWord)
+    if (replacement !== source) return { content: replacement }
+  }
+
+  const roomMatch = transcript.match(/(?:不是|原来是)\s*(\d{3,4})\s*房?(?:间)?[^，。；;]*?(?:改成|是)\s*(\d{3,4})\s*房?(?:间)?/u)
+  if (roomMatch && source.includes(roomMatch[1])) {
+    const [, previousRoom, nextRoom] = roomMatch
+    const nextEntities = Array.isArray(current.entities)
+      ? current.entities.map(entity => entity?.type === 'room'
+        ? { ...entity, id: `room:${nextRoom}` }
+        : entity)
+      : undefined
+    return {
+      content: source.replaceAll(previousRoom, nextRoom),
+      ...(nextEntities ? { entities: nextEntities } : {}),
+    }
+  }
+  return {}
+}
+
+function atomicBestEffortInput(value) {
+  const source = atomicBusinessInput(value)
+  const minimum = atomicMinimumInput(source)
+  if (!minimum) return null
+  const result = { ...minimum }
+
+  for (const [field, limit] of [['action', 120], ['details', 8_000], ['status', 80]]) {
+    const candidate = typeof source[field] === 'string' ? source[field].trim() : ''
+    if (candidate && candidate.length <= limit) result[field] = candidate
+  }
+  if (typeof source.occurredAt === 'string' && Number.isFinite(new Date(source.occurredAt).getTime())) {
+    result.occurredAt = source.occurredAt
+  }
+  if (source.facts && typeof source.facts === 'object' && !Array.isArray(source.facts)) {
+    const facts = Object.fromEntries(Object.entries(source.facts)
+      .filter(([key]) => /^[a-zA-Z一-鿿][a-zA-Z0-9_一-鿿]*$/u.test(key))
+      .map(([key, raw]) => {
+        if (['quantity', 'countedQuantity'].includes(key)) {
+          const numeric = Number(raw)
+          if (!Number.isFinite(numeric) || numeric < 0) return null
+          return [key, numeric]
+        }
+        if (raw === null || ['string', 'number', 'boolean'].includes(typeof raw)) return [key, raw]
+        try {
+          return [key, JSON.stringify(raw).slice(0, 2_000)]
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean))
+    if (Object.keys(facts).length) result.facts = facts
+  }
+  if (Array.isArray(source.entities)) {
+    const entities = source.entities
+      .filter(entity => entity && typeof entity === 'object' && !Array.isArray(entity))
+      .map(entity => ({
+        type: String(entity.type || '').trim().toLowerCase(),
+        id: String(entity.id || entity.mention || entity.name || '').trim(),
+        role: typeof entity.role === 'string' ? entity.role.trim() : '',
+      }))
+      .filter(entity => (
+        ATOMIC_ENTITY_TYPES.has(entity.type)
+        && entity.id
+        && entity.id.length <= 160
+        && (!entity.role || entity.role.length <= 80)
+      ))
+      .map(entity => ({
+        type: entity.type,
+        id: entity.id,
+        ...(entity.role ? { role: entity.role } : {}),
+      }))
+    if (entities.length) result.entities = entities
+  }
+  return result
 }
 
 class TaskReferenceError extends Error {
@@ -72,6 +273,16 @@ function normalizeTaskReference(value) {
 }
 
 const SPIRIT_TASK_TIME_ZONE = 'Asia/Shanghai'
+
+const TASK_MUTATION_TOOLS = new Set([
+  SPIRIT_TASK_CREATE_TOOL_NAME,
+  SPIRIT_TASK_UPDATE_TOOL_NAME,
+  SPIRIT_TASK_START_TOOL_NAME,
+  SPIRIT_TASK_COMPLETE_TOOL_NAME,
+  SPIRIT_TASK_UPDATE_STATUS_TOOL_NAME,
+  SPIRIT_TASK_ADD_COMMENT_TOOL_NAME,
+  SPIRIT_TASK_DELETE_TOOL_NAME,
+])
 
 function standardTaskDurationMinutes(request) {
   const text = String(request || '').replace(/\s+/gu, '')
@@ -261,6 +472,7 @@ export class ToolCallHandler {
     getClientContext = () => ({}),
     getConversationContext = () => [],
     getTaskContext = () => [],
+    getRecordContext = () => [],
     getEnterpriseContext = async () => null,
     onTaskContextChanged = () => {},
     onMemoryChanged = () => {},
@@ -270,6 +482,13 @@ export class ToolCallHandler {
     requestClientState = () => {},
     spiritTaskClient = null,
     spiritVoiceNotifier = null,
+    atomicRecordStore = null,
+    atomicSpaceProvider = null,
+    taskNotificationWaitMs = TASK_NOTIFICATION_WAIT_MS,
+    onConversationMessage = () => {},
+    onRecordFact = () => {},
+    onRecordClarification = () => {},
+    onToolConfirmationPending = () => {},
   }) {
     this.taskManager = taskManager
     this.ownerId = ownerId
@@ -285,6 +504,7 @@ export class ToolCallHandler {
     this.getClientContext = getClientContext
     this.getConversationContext = getConversationContext
     this.getTaskContext = getTaskContext
+    this.getRecordContext = getRecordContext
     this.getEnterpriseContext = getEnterpriseContext
     this.onTaskContextChanged = onTaskContextChanged
     this.onMemoryChanged = onMemoryChanged
@@ -294,10 +514,38 @@ export class ToolCallHandler {
     this.requestClientState = requestClientState
     this.spiritTaskClient = spiritTaskClient
     this.spiritVoiceNotifier = spiritVoiceNotifier
+    this.atomicRecordStore = atomicRecordStore
+    this.atomicSpaceProvider = atomicSpaceProvider
+    this.taskNotificationWaitMs = Math.max(1, Number(taskNotificationWaitMs) || TASK_NOTIFICATION_WAIT_MS)
+    this.onConversationMessage = onConversationMessage
+    this.onRecordFact = onRecordFact
+    this.onRecordClarification = onRecordClarification
+    this.onToolConfirmationPending = onToolConfirmationPending
     this.gatewayApprovedPermissions = new Set()
     this.processedCalls = new Set()
     this.turnTasks = new Map()
+    this.turnOperationModes = new Map()
+    this.atomicWriteFailures = new Map()
     this.deferredToolResponses = new Map()
+  }
+
+  claimTurnOperation(turnId, mode) {
+    const key = String(turnId || '').trim()
+    if (!key) return true
+    const current = this.turnOperationModes.get(key)
+    if (current && current !== mode) return false
+    this.turnOperationModes.set(key, mode)
+    if (this.turnOperationModes.size > 200) {
+      this.turnOperationModes.delete(this.turnOperationModes.keys().next().value)
+    }
+    return true
+  }
+
+  releaseTurnOperation(turnId, mode) {
+    const key = String(turnId || '').trim()
+    if (!key || this.turnOperationModes.get(key) !== mode) return false
+    this.turnOperationModes.delete(key)
+    return true
   }
 
   isStale(turnId, generation) {
@@ -312,14 +560,90 @@ export class ToolCallHandler {
       responseContext,
       ...frontendOptions
     } = options || {}
-    await this.getFrontend()?.sendFunctionOutput(
+    const frontend = this.getFrontend?.()
+    if (!frontend || typeof frontend.sendFunctionOutput !== 'function') {
+      if (output?.status === 'ok' && output?.source === 'spirit-api-direct') {
+        this.onTaskContextChanged(output)
+      }
+      return { skipped: true, reason: 'realtime_unavailable' }
+    }
+    const delivery = await frontend.sendFunctionOutput(
       callId,
       output,
       { turnId, taskId, ...(responseContext || {}) },
       frontendOptions,
     )
+    if (!delivery && frontend.ready === false) {
+      return { skipped: true, reason: 'realtime_not_ready' }
+    }
     if (output?.status === 'ok' && output?.source === 'spirit-api-direct') {
       this.onTaskContextChanged(output)
+    }
+    return delivery
+  }
+
+  async sendConfirmedOutput(callId, output, turnId, taskId, confirmation) {
+    const liveFrontend = this.getFrontend?.()
+    let delivery
+    try {
+      if (typeof liveFrontend?.speak === 'function') {
+        delivery = await this.sendOutput(callId, output, turnId, taskId, {
+          createResponse: false,
+        })
+        if (!delivery?.skipped && !delivery?.failed) {
+          delivery = await liveFrontend.speak(confirmation, 'agent', { turnId, taskId }, {
+            verbatim: true,
+          })
+        }
+      } else {
+        delivery = await this.sendOutput(callId, output, turnId, taskId, {
+          response: {
+            instructions: [
+              `只说下面这句话，不要改写：${confirmation}`,
+              '不要朗读任务 ID、用户 ID、记录 ID、接口名或内部字段。',
+            ].join(' '),
+          },
+        })
+      }
+    } catch (error) {
+      delivery = { failed: true, error: String(error?.message || error) }
+    }
+    if (delivery?.reason === 'realtime_unavailable'
+      || delivery?.reason === 'realtime_not_ready'
+      || delivery?.failed
+      || delivery?.timedOut
+      || delivery?.cancelled) {
+      this.onToolConfirmationPending({ content: confirmation, turnId })
+    }
+    return delivery
+  }
+
+  async speakBackgroundConfirmation(content, { turnId, taskId } = {}) {
+    const confirmation = String(content || '').trim()
+    if (!confirmation) return
+    this.onConversationMessage({
+      role: 'assistant',
+      content: confirmation,
+      source: 'tool-result',
+      turnId,
+    })
+    const liveFrontend = this.getFrontend?.()
+    if (typeof liveFrontend?.speak !== 'function' || liveFrontend.ready === false) {
+      this.onToolConfirmationPending({ content: confirmation, turnId })
+      return
+    }
+    try {
+      const delivery = await liveFrontend.speak(
+        confirmation,
+        'agent',
+        { turnId, taskId },
+        { verbatim: true },
+      )
+      if (delivery?.failed || delivery?.timedOut || delivery?.cancelled || delivery?.skipped) {
+        this.onToolConfirmationPending({ content: confirmation, turnId })
+      }
+    } catch {
+      this.onToolConfirmationPending({ content: confirmation, turnId })
     }
   }
 
@@ -574,6 +898,23 @@ export class ToolCallHandler {
       return
     }
 
+    const operationMode = [
+      ATOMIC_RECORD_WRITE_TOOL_NAME,
+      ATOMIC_RECORD_CORRECT_TOOL_NAME,
+    ].includes(toolName)
+      ? 'event'
+      : TASK_MUTATION_TOOLS.has(toolName)
+        ? 'task'
+        : null
+    if (operationMode && !this.claimTurnOperation(turnId, operationMode)) {
+      await this.sendOutput(callId, failure(
+        'exclusive_task_event_choice',
+        '这一轮已经选择了任务操作，不能同时写事件。任务产生的事实由后续慢模型处理。',
+        { retryable: false },
+      ), turnId)
+      return
+    }
+
     if (toolName === GET_CURRENT_TIME_TOOL_NAME) {
       await this.getCurrentTime(callId, turnId)
       return
@@ -657,6 +998,18 @@ export class ToolCallHandler {
     }
     if (toolName === SPIRIT_VOICE_NOTIFY_TOOL_NAME) {
       await this.notifySpiritUser(callId, turnId, args)
+      return
+    }
+    if (toolName === ATOMIC_RECORD_WRITE_TOOL_NAME) {
+      await this.writeAtomicRecord(callId, turnId, args)
+      return
+    }
+    if (toolName === ATOMIC_RECORD_QUERY_TOOL_NAME) {
+      await this.queryAtomicRecords(callId, turnId, args)
+      return
+    }
+    if (toolName === ATOMIC_RECORD_CORRECT_TOOL_NAME) {
+      await this.correctAtomicRecord(callId, turnId, args)
       return
     }
     if (toolName !== DELEGATE_TOOL_NAME) {
@@ -958,12 +1311,19 @@ export class ToolCallHandler {
     if (!assignee?.userId) return { status: 'not_available' }
     if (!this.spiritVoiceNotifier?.configured) return { status: 'not_configured' }
     try {
-      return await this.spiritVoiceNotifier.notify({
+      const notificationPromise = this.spiritVoiceNotifier.notify({
         recipientId: assignee.userId,
         recipientName: assignee.name,
         title: '工作通知',
         text,
-      })
+      }).catch(error => ({
+        status: 'failed',
+        error: String(error?.message || error),
+      }))
+      return await settleWithTimeout(
+        notificationPromise,
+        this.taskNotificationWaitMs,
+      )
     } catch (error) {
       return {
         status: 'failed',
@@ -1117,23 +1477,23 @@ export class ToolCallHandler {
         if (!this.spiritVoiceNotifier?.configured) {
           notification = { status: 'not_configured' }
         } else {
-          try {
-            notification = await this.spiritVoiceNotifier.notify({
-              recipientId: assignee.userId,
-              recipientName: assignee.name,
-              title: '工作通知',
-              text: `您有一个新任务【${summary}】，请立即执行。`,
-            })
-          } catch (error) {
-            notification = {
-              status: 'failed',
-              error: String(error?.message || error),
-            }
-          }
+          const notificationPromise = this.spiritVoiceNotifier.notify({
+            recipientId: assignee.userId,
+            recipientName: assignee.name,
+            title: '工作通知',
+            text: `您有一个新任务【${summary}】，请立即执行。`,
+          }).catch(error => ({
+            status: 'failed',
+            error: String(error?.message || error),
+          }))
+          notification = await settleWithTimeout(
+            notificationPromise,
+            this.taskNotificationWaitMs,
+          )
         }
       }
 
-      await this.sendOutput(callId, {
+      const output = {
         status: 'ok',
         source: 'spirit-api-direct',
         action: 'created',
@@ -1147,16 +1507,20 @@ export class ToolCallHandler {
         },
         notification,
         result: created,
-      }, turnId, taskId, {
-        response: {
-          instructions: [
-            '直接说“任务已派给某人”，必要时补充通知结果；不要开场或解释过程。',
-            '只有 notification.status=sent 才能说语音通知已发送。',
-            'skipped_by_gate 表示任务已创建，但接收人关闭通知；当前不检查是否在岗。failed 或 not_configured 也必须明确区分。',
-            '不要朗读 taskId、userId、函数名、接口名或内部字段。',
-          ].join(' '),
-        },
+      }
+      const confirmation = taskDispatchConfirmation({
+        summary,
+        assigneeName: assignee.name,
+        notificationStatus: notification.status,
+        selfTest,
       })
+      this.onConversationMessage({
+        role: 'assistant',
+        content: confirmation,
+        source: 'tool-result',
+        turnId,
+      })
+      await this.sendConfirmedOutput(callId, output, turnId, taskId, confirmation)
     } catch (error) {
       await this.sendOutput(callId, failure(
         'task_create_failed',
@@ -1466,6 +1830,443 @@ export class ToolCallHandler {
     }
   }
 
+  async writeAtomicRecord(callId, turnId, args) {
+    if (!this.atomicRecordStore && !this.atomicSpaceProvider) {
+      await this.sendOutput(callId, failure(
+        'atomic_record_unavailable',
+        '这条记录暂时没有保存。',
+        { retryable: true },
+      ), turnId, null, {
+        response: {
+          instructions: '只对用户说：“这条暂时没有记成，我保留着刚才的内容。”不要说存储、接口、工具或配置。',
+        },
+      })
+      return
+    }
+    const factState = String(args.factState || '').trim()
+    if (!ATOMIC_FACT_STATES.has(factState)) {
+      this.releaseTurnOperation(turnId, 'event')
+      await this.sendOutput(callId, failure(
+        'atomic_record_fact_state_required',
+        '需要先判断这句话是在报告已经成立的事实，还是要求后续执行。',
+        { retryable: true },
+      ), turnId, null, {
+        response: {
+          instructions: [
+            '不要向用户提内部字段。重新结合用户原话判断时间性质。',
+            '已经发生、观察到或核实的事实，重试记录；已经确认成立但未来生效的预留或安排，也可记录。',
+            '仍待执行的“请送、记得留、去检查、安排处理”必须改用任务工具，不能写成已经完成的事件。',
+            '只有用户原话本身确实无法判断时，才用一句自然话确认“这是已经办好了，还是需要安排去做？”。',
+          ].join(' '),
+        },
+      })
+      return
+    }
+    const businessInput = atomicBusinessInput(args)
+    try {
+      const enterpriseContext = await this.getEnterpriseContext()
+      const subject = enterpriseContext?.subject || {}
+      const transcript = String(await this.transcripts?.transcript(turnId) || '').trim()
+      const directArgs = {
+        ...businessInput,
+        // This handler is the live user voice path. A model cannot forge a
+        // PMS or task-transition source; slow-model writers use the store
+        // contract directly with their trusted source metadata.
+        sourceTrigger: 'user_turn',
+        rawText: transcript || undefined,
+        // Replayed calls in the same voice turn update the same record. This
+        // also makes the minimum-record fallback safe after a failed optional
+        // entity or fact validation.
+        idempotencyKey: `voice:${this.ownerId}:${String(turnId || callId).slice(0, 160)}`,
+      }
+      const context = {
+        ownerId: this.ownerId,
+        actorId: subject.userId || this.ownerId,
+        actorName: subject.displayName || '',
+      }
+      const write = input => (this.atomicSpaceProvider
+        ? this.atomicSpaceProvider.writeInstance({
+            modelType: 'event',
+            input,
+            context,
+          })
+        : this.atomicRecordStore.write(input, context))
+      let result
+      try {
+        result = await write(directArgs)
+        } catch (initialError) {
+          if (initialError?.code === 'ATOMIC_EVENT_REQUIREMENTS_MISSING') {
+            throw initialError
+          }
+          const bestEffort = atomicBestEffortInput(businessInput)
+          if (!bestEffort) throw initialError
+          // A malformed optional entity must not erase correctly extracted
+          // room, item or timing data. Retry once after stripping only fields
+          // that cannot satisfy the compact event contract.
+          result = await write({
+            ...bestEffort,
+            sourceTrigger: directArgs.sourceTrigger,
+            rawText: directArgs.rawText,
+            idempotencyKey: directArgs.idempotencyKey,
+          })
+      }
+      this.atomicWriteFailures.delete(String(turnId || ''))
+      this.onRecordClarification(null)
+      const confirmation = buildRecordVoiceConfirmation(result.record)
+      // Persist the successful action in the Gateway short-term context too.
+      // The realtime provider may be reconnecting when the spoken response is
+      // generated; the next turn must still know what was actually saved.
+      this.onRecordFact({ record: result.record, operation: result.action || 'created' })
+      this.onConversationMessage({
+        role: 'assistant',
+        content: confirmation,
+        source: 'tool-result',
+        turnId,
+      })
+      await this.sendConfirmedOutput(callId, {
+        status: 'ok',
+        source: 'atomic-record-direct',
+        ...result,
+      }, turnId, result.record?.recordId, confirmation)
+    } catch (error) {
+      if (error?.code === 'ATOMIC_EVENT_REQUIREMENTS_MISSING') {
+        const guidance = String(
+          error.clarificationGuidance
+          || '还需要补充一项能够让这条事实准确、可追踪的业务信息',
+        ).trim()
+        this.onRecordClarification({
+          input: businessInput,
+          missingFacts: error.missingFacts,
+          anyEntityTypes: error.anyEntityTypes,
+          anyEntityRoles: error.anyEntityRoles,
+          guidance,
+          entityHints: error.entityHints,
+        })
+        await this.sendOutput(callId, failure(
+          'atomic_record_needs_clarification',
+          '这条事实还需要补充一项关键信息，暂未写入。',
+          {
+            retryable: true,
+            action: error.action,
+            missingFacts: error.missingFacts,
+            anyEntityTypes: error.anyEntityTypes,
+            anyEntityRoles: error.anyEntityRoles,
+            clarificationGuidance: guidance,
+            entityHints: error.entityHints,
+          },
+        ), turnId, null, {
+          response: {
+            instructions: [
+              '这条记录尚未写入。结合本轮原话和前面连续对话，先判断用户已经提供了哪些信息；已经说过的内容不得再次询问。',
+              `当前仍需补充的业务信息是：${guidance}。`,
+              Array.isArray(error.entityHints) && error.entityHints.length
+                ? `可参考但不必全部列举的定位线索有：${error.entityHints.join('、')}。`
+                : '',
+              '由你根据上下文自己组织一句自然追问，只问当前最容易回答的一个关键点。先承接用户刚补充的线索，不得照抄固定模板，不得重复上一轮原句。',
+              '例如用户已经说“携程订单”，就承认这是携程渠道，再询问订单号、入住人姓名或入住日期中的一项；不要重新从房号开始盘问。',
+              '不要说字段、类型、代码、ID、接口、校验或系统规则。',
+            ].filter(Boolean).join(' '),
+          },
+        })
+        return
+      }
+      const failureKey = String(turnId || '')
+      const failures = (this.atomicWriteFailures.get(failureKey) || 0) + 1
+      this.atomicWriteFailures.set(failureKey, failures)
+      if (this.atomicWriteFailures.size > 200) {
+        this.atomicWriteFailures.delete(this.atomicWriteFailures.keys().next().value)
+      }
+      await this.sendOutput(callId, failure(
+        'atomic_record_write_failed',
+        failures === 1
+          ? '请在内部修正记录内容后重试。'
+          : '这条记录暂时没有保存。',
+        {
+          retryable: failures === 1,
+          internal_reason: String(error?.message || error),
+        },
+      ), turnId, null, {
+            response: {
+              instructions: failures === 1
+                ? '不要对用户说话，不要解释错误。用已有的用户原话修正 atomic_record_write 参数并立即重试一次：只要 category 和完整 content 存在就可以落库；facts 和 entities 能确定多少填多少。不得朗读 internal_reason，不得向用户说字段、类型、代码、ID、接口或校验规则。'
+                : '不再重试。只对用户说：“这条暂时没有记成，我保留着刚才的内容。”不得朗读 internal_reason，不得说字段、类型、代码、ID、接口或校验规则。',
+        },
+      })
+    }
+  }
+
+  recentRecordFact(reference = '') {
+    const context = this.getRecordContext?.()
+    const records = Array.isArray(context) ? context : []
+    if (!records.length) return null
+    const query = speechFragment(reference)
+    if (!query || /刚才|刚刚|上一条|那条|这条|最后|最近/u.test(query)) {
+      return records[0]
+    }
+    const compact = value => String(value || '')
+      .toLocaleLowerCase()
+      .replace(/[\p{P}\p{S}\s]+/gu, '')
+    const queryKey = compact(query)
+    const exact = records.find(record => {
+      const summary = compact(record.summary)
+      return queryKey.length >= 3 && (summary.includes(queryKey) || queryKey.includes(summary))
+    })
+    if (exact) return exact
+    const queryChars = new Set([...queryKey])
+    return records.find(record => {
+      if (queryChars.size < 3) return false
+      const summaryChars = new Set([...compact(record.summary)])
+      let shared = 0
+      for (const char of queryChars) {
+        if (summaryChars.has(char)) shared += 1
+      }
+      return shared / queryChars.size >= 0.6
+    }) || null
+  }
+
+  async resolveAtomicRecordId(args = {}) {
+    const explicit = String(args.recordId || '').trim()
+    if (explicit) return explicit
+    const reference = String(args.reference || '').trim()
+    const recentFact = this.recentRecordFact(reference)
+    if (recentFact?.recordId) return recentFact.recordId
+    if (!reference) throw new Error('没有找到刚才要更正的记录')
+    const room = reference.match(/(?:房间|房)\s*(\d{3,4})/u)?.[1]
+      || reference.match(/\b(\d{3,4})\b/u)?.[1]
+    const filters = {
+      ...(room ? { objectType: 'room', objectId: room } : {}),
+      limit: 20,
+    }
+    let result = this.atomicSpaceProvider
+      ? await this.atomicSpaceProvider.queryInstances({
+          modelType: 'event',
+          filters,
+          context: { ownerId: this.ownerId },
+        })
+      : await this.atomicRecordStore.query(filters, { ownerId: this.ownerId })
+    let records = Array.isArray(result?.records) ? result.records : []
+    if (!records.length) {
+      const fallback = this.atomicSpaceProvider
+        ? await this.atomicSpaceProvider.queryInstances({
+            modelType: 'event',
+            filters: { keyword: reference, limit: 20 },
+            context: { ownerId: this.ownerId },
+          })
+        : await this.atomicRecordStore.query({ keyword: reference, limit: 20 }, { ownerId: this.ownerId })
+      records = Array.isArray(fallback?.records) ? fallback.records : []
+    }
+    if (!records.length) throw new Error('没有找到要更正的记录')
+    const recent = /刚才|刚刚|最后|最近/u.test(reference)
+    if (records.length > 1 && !recent) {
+      const labels = records.slice(0, 3).map(record => record.summary).filter(Boolean)
+      throw new Error(`找到多条可能的记录：${labels.join('；')}，请说清房间或事项`)
+    }
+    return records[0].recordId
+  }
+
+  async correctAtomicRecord(callId, turnId, args) {
+    if (!this.atomicRecordStore && !this.atomicSpaceProvider) {
+      await this.sendOutput(callId, failure(
+        'atomic_record_unavailable',
+        '当前没有连接到原子记录存储。',
+        { retryable: true },
+      ), turnId)
+      return
+    }
+    try {
+      const transcript = String(await this.transcripts?.transcript(turnId) || '').trim()
+      const action = String(args.action || 'update').trim().toLowerCase()
+      const explicitlyCorrecting = /(?:改|更正|纠正|重记|记错|不是)/u.test(transcript)
+      const explicitlyDeleting = /(?:删|删除)/u.test(transcript)
+      if (action === 'delete' && !explicitlyDeleting) {
+        throw new Error('删除记录需要用户在当前这句话中明确提出删除')
+      }
+      const recordId = await this.resolveAtomicRecordId(args)
+      const recentFact = this.recentRecordFact(args.reference)
+      const suppliedChanges = args.changes && typeof args.changes === 'object'
+        ? args.changes
+        : {}
+      const derivedChanges = action === 'update'
+        ? deriveCorrectionChanges(recentFact, transcript)
+        : {}
+      const changes = { ...derivedChanges, ...suppliedChanges }
+      if (action === 'update' && !Object.keys(changes).length) {
+        throw new Error(explicitlyCorrecting
+          ? '没有识别出需要修改成什么内容'
+          : '请直接说明需要改成什么内容')
+      }
+      if (action === 'rewrite' && !explicitlyCorrecting && !args.replacement?.content) {
+        throw new Error('请直接说明重记后的完整内容')
+      }
+      const subject = await this.getEnterpriseContext()
+      const context = {
+        ownerId: this.ownerId,
+        actorId: subject?.subject?.userId || this.ownerId,
+        actorName: subject?.subject?.displayName || '',
+      }
+      const result = this.atomicSpaceProvider
+        ? await this.atomicSpaceProvider.correctInstance({
+            modelType: 'event',
+            recordId,
+            action,
+            patch: changes,
+            replacement: args.replacement || {},
+            reason: args.reason,
+            context,
+          })
+        : await this.atomicRecordStore.correct({
+            recordId,
+            action,
+            patch: changes,
+            replacement: args.replacement || {},
+          reason: args.reason,
+        }, context)
+      const labels = { updated: '已修改', rewritten: '已重记', deleted: '已删除' }
+      const confirmation = buildRecordVoiceConfirmation(
+        result.record,
+        labels[result.action] || '已处理',
+      )
+      this.onRecordFact({
+        record: result.record,
+        operation: result.action || action,
+      })
+      this.onConversationMessage({
+        role: 'assistant',
+        content: confirmation,
+        source: 'tool-result',
+        turnId,
+      })
+      let delivery
+      try {
+        const output = {
+          status: 'ok',
+          source: 'atomic-record-direct',
+          ...result,
+        }
+        const liveFrontend = this.getFrontend?.()
+        if (typeof liveFrontend?.speak === 'function') {
+          delivery = await this.sendOutput(
+            callId,
+            output,
+            turnId,
+            result.record?.recordId,
+            { createResponse: false },
+          )
+          if (!delivery?.skipped && !delivery?.failed) {
+            delivery = await liveFrontend.speak(confirmation, 'agent', { turnId }, {
+              verbatim: true,
+            })
+          }
+        } else {
+          delivery = await this.sendOutput(callId, output, turnId, result.record?.recordId, {
+            response: {
+              instructions: [
+                `只说下面这句话，不要改写：${confirmation}`,
+                '不要朗读记录 ID、接口名或内部字段。',
+              ].join(' '),
+            },
+          })
+        }
+      } catch (error) {
+        delivery = { failed: true, error: String(error?.message || error) }
+      }
+      if (delivery?.reason === 'realtime_unavailable'
+        || delivery?.reason === 'realtime_not_ready'
+        || delivery?.failed
+        || delivery?.timedOut
+        || delivery?.cancelled) {
+        this.onToolConfirmationPending({ content: confirmation, turnId })
+      }
+    } catch (error) {
+      await this.sendOutput(callId, failure(
+        'atomic_record_correction_failed',
+        String(error?.message || error),
+        { retryable: false },
+      ), turnId, null, {
+        response: {
+          instructions: '简短说明修改没有完成以及真实原因；如果找到多条候选，请用户补充房间或事项，不要索要记录 ID。',
+        },
+      })
+    }
+  }
+
+  async queryAtomicRecords(callId, turnId, args) {
+    if (!this.atomicRecordStore && !this.atomicSpaceProvider) {
+      await this.sendOutput(callId, failure(
+        'atomic_record_unavailable',
+        '当前没有连接到原子记录存储。',
+        { retryable: true },
+      ), turnId)
+      return
+    }
+    try {
+      const result = this.atomicSpaceProvider
+        ? await this.atomicSpaceProvider.queryInstances({
+            modelType: 'event',
+            filters: args,
+            context: { ownerId: this.ownerId },
+          })
+        : await this.atomicRecordStore.query(args, { ownerId: this.ownerId })
+      const resultWithLocalTimes = this.withLocalRecordTimes(result)
+      await this.sendOutput(callId, {
+        status: 'ok',
+        source: 'atomic-record-direct',
+        result: resultWithLocalTimes,
+      }, turnId, null, {
+        response: {
+          instructions: [
+            '第一句话直接说记录结果，不要说“我查到了”“根据资料”或工具过程。',
+            '按用户问题只说相关记录；结果为空时只说没有查到相关记录。',
+            '记录里有待归还、待结算或未关闭事项时要明确说出；不要朗读 recordId、ownerId、接口名和文件路径。',
+            '时间按 occurredAtLocal 或 recordedAtLocal（北京时间）表达，不要把 UTC 原始时间直接说给用户。',
+          ].join(' '),
+        },
+      })
+    } catch (error) {
+      await this.sendOutput(callId, failure(
+        'atomic_record_query_failed',
+        String(error?.message || error),
+        { retryable: true },
+      ), turnId, null, {
+        response: {
+          instructions: '简短说明原子记录暂时查不到以及真实原因，不要编造结果。',
+        },
+      })
+    }
+  }
+
+  withLocalRecordTimes(result) {
+    const timeZone = this.getClientContext?.()?.timeZone || 'Asia/Shanghai'
+    const formatter = new Intl.DateTimeFormat('zh-CN', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    })
+    const localize = record => {
+      if (!record || typeof record !== 'object') return record
+      const local = value => {
+        if (!value) return undefined
+        const date = new Date(value)
+        return Number.isFinite(date.getTime()) ? formatter.format(date) : undefined
+      }
+      return {
+        ...record,
+        timeZone,
+        ...(local(record.occurredAt) ? { occurredAtLocal: local(record.occurredAt) } : {}),
+        ...(local(record.timing?.recordedAt) ? { recordedAtLocal: local(record.timing.recordedAt) } : {}),
+      }
+    }
+    return {
+      ...result,
+      records: Array.isArray(result?.records) ? result.records.map(localize) : result?.records,
+    }
+  }
+
   async notifySpiritUser(callId, turnId, args) {
     try {
       if (!this.spiritVoiceNotifier?.configured) {
@@ -1479,27 +2280,39 @@ export class ToolCallHandler {
         floor: args.floor,
         request: text,
       })
-      const notification = await this.spiritVoiceNotifier.notify({
+      const notificationPromise = this.spiritVoiceNotifier.notify({
         recipientId: assignee.userId,
         recipientName: assignee.name,
         title: String(args.title || '工作通知').trim(),
         text,
-      })
-      await this.sendOutput(callId, {
+      }).catch(error => ({
+        status: 'failed',
+        error: String(error?.message || error),
+      }))
+      const notification = await settleWithTimeout(
+        notificationPromise,
+        this.taskNotificationWaitMs,
+      )
+      const output = {
         status: 'ok',
         source: 'spirit-api-direct',
         action: 'voice_notified',
         assignee: { name: assignee.name, userId: assignee.userId },
+        text,
         notification,
-      }, turnId, null, {
-        response: {
-          instructions: [
-            '只有 notification.status=sent 才能说语音通知已发送。',
-            '如果是 skipped_by_gate，只说明接收人关闭了通知；当前不检查是否在岗。不要声称成功。',
-            '不要朗读 userId、音频 URL、消息 ID 或内部字段。',
-          ].join(' '),
-        },
+      }
+      const confirmation = notificationConfirmation({
+        recipientName: assignee.name,
+        content: text,
+        status: notification?.status,
       })
+      this.onConversationMessage({
+        role: 'assistant',
+        content: confirmation,
+        source: 'tool-result',
+        turnId,
+      })
+      await this.sendConfirmedOutput(callId, output, turnId, null, confirmation)
     } catch (error) {
       await this.sendOutput(callId, failure(
         'voice_notification_failed',

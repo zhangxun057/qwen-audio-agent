@@ -111,6 +111,17 @@ test('injects recent confirmed task facts without replaying full history', () =>
   assert.match(context, /assignee=黄维维/)
 })
 
+test('injects recent confirmed record facts for short follow-up references', () => {
+  const context = buildFrontendContext({
+    recordContext: [{
+      room: '801', action: '借出', item: '矿泉水', quantity: 2, unit: '瓶',
+    }],
+  })
+  assert.match(context, /<recent_confirmed_records>/)
+  assert.match(context, /801房，借出，矿泉水2瓶/)
+  assert.doesNotMatch(context, /record-1/)
+})
+
 test('keeps mutable task state out of persistent frontend instructions', () => {
   const context = buildFrontendContext({
     activeTasks: [

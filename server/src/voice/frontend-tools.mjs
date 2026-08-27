@@ -6,6 +6,7 @@ import {
 import { MEMORY_DOCUMENTS } from '../core/memory-scopes.mjs'
 import { buildSpiritTaskDispatchContext } from './spirit-task-directory.mjs'
 import { SPIRIT_TASK_STATUSES } from './spirit-task-direct.mjs'
+import { OBJECT_TYPES, RECORD_CATEGORIES } from '../atomic/atomic-record-store.mjs'
 
 export const SPAWN_THINKING_TOOL_NAME = 'spawn_thinking'
 export const SCHEDULE_REMINDER_TOOL_NAME = 'schedule_reminder'
@@ -28,8 +29,70 @@ export const SPIRIT_TASK_UPDATE_STATUS_TOOL_NAME = 'spirit_task_update_status'
 export const SPIRIT_TASK_ADD_COMMENT_TOOL_NAME = 'spirit_task_add_comment'
 export const SPIRIT_TASK_DELETE_TOOL_NAME = 'spirit_task_delete'
 export const SPIRIT_VOICE_NOTIFY_TOOL_NAME = 'spirit_voice_notify'
+export const ATOMIC_RECORD_WRITE_TOOL_NAME = 'atomic_record_write'
+export const ATOMIC_RECORD_QUERY_TOOL_NAME = 'atomic_record_query'
+export const ATOMIC_RECORD_CORRECT_TOOL_NAME = 'atomic_record_correct'
 export const STANDARD_TOOL_PROFILE = 'standard'
 export const HOTEL_DIRECT_TOOL_PROFILE = 'hotel-direct'
+
+function buildAtomicRecordInstructions() {
+  return [
+    '<hotel_atomic_records>',
+    '以下是 Gateway 运行时覆盖规则，优先于企业上下文中旧的实体解析描述。',
+    '每轮只能选一个业务写入方向：需要在对话外执行的工作调用任务工具；已经发生且无需派活的事实调用 atomic_record_write。任务工具和 atomic_record_write 在同一轮互斥。',
+    '按事实是否已经发生判断，不按“借、送、修”等动词机械判断：“已经借出、已经送到、刚捡到、实际用了”写记录；“请送、需要借、去检查、安排维修”派任务。省略时态的“1501房借一个充电宝”通常是待办请求，派任务；用户随后说“已经给他了”才表示借出事实。',
+    '创建任务时不写事件，也不向任务增加 recordPlan、sourceFact 等记事字段。任务完成后的事件由后续慢模型根据任务变化检查。',
+    'atomic_record_write 只写已经发生或已经确认的事实。只在“物品、客人、酒店、其他”四类中选一类；动作用简短中文，content 写成脱离对话也能独立理解的完整事实。',
+    '“其他”只兜底没有预设标准的事实，不能用来绕过已知动作的最低要求。动作已经明确属于借出、投诉、要求、报失、偏好、住店变化、服务结果、寄存或预留时，必须使用该动作所属类别。借出、借用、外借、借给都按同一借出事实处理：必须明确物品、数量，并且房间、住店记录、明确客人或员工至少有一个；常见物品单位可由 Gateway 补齐，其他信息缺少时只追问一个最短问题。',
+    '投诉必须明确投诉内容，并知道是谁投诉：投诉房间、住店记录、具体订单或可识别客人至少一个，对应实体 role 填 complainant。被投诉的房间或地点 role 填 complaint_target，不能拿它冒充投诉人。“携程订单、平台订单、这个客人”等泛称只是线索，不是可追踪对象。',
+    '客人的要求、报失、偏好、住店变化、服务结果、寄存和预留也必须能追踪到房间、住店记录、具体订单或可识别客人。缺少时不要写半条记录；结合连续对话承接用户已经补充的线索，只问当前最容易回答的一项。不得照抄固定模板，不得连续重复上一轮问题。用户说“携程订单”后，应先承认渠道线索，再自然询问订单号、入住人姓名或入住日期中的一项，不要退回去机械追问房号；如果后续得到“明天入住的李先生”这类姓名加日期线索，应与“携程订单”合并后立即重试写入，不得继续索要房号。',
+    '物品包括送出、消耗、借还、售卖、库存结果和拾获交存；客人包括投诉、要求、报失、偏好和本次住店事实；酒店包括房间设施、公共区域、交通天气和交接等已发生事实；无法稳定归类就用其他，不为分类追问用户。',
+    '送水、补水、给房间放水、添水都按物品处理；客人投诉、提出要求或报失按客人处理；设施、场所或公共运行事实按酒店处理；拿不准就用其他。',
+    '失物不是独立类别：客人说丢了东西，记客人“报失”；员工捡到东西，记物品“拾获”。失物只写物品描述和已知地点，不要求房号，不要编造失物 ID。',
+    'facts 和 entities 在语法上可选，但用户明确说出房间、物品、住店记录、员工或地点时必须填入对应实体；不能只把它写进 content 后就省略。实体无法解析仍先按原话填入，不能因此阻断记录。数量、单位、原因、结果等能确定多少填多少；其他类不要求额外对象或结构化维度，但快模型仍要填写 category、factState、action 和完整 content。底层原子空间可为慢模型和未知事项保留 category + content 的最小兜底。',
+    '盘点是待执行动作，应派任务；盘点产生的已核实数量、消耗或差异才写物品记录。',
+    '房间号按租户内规则直接组合；即使某个房号尚未出现在预加载索引，也照常记录。常用物资由默认目录覆盖；特殊物资未命中时也照常记录，由 Gateway 生成稳定待解析物品 ID。',
+    'recordedBy、relayedBy、发生/记录时间、幂等键由 Gateway 注入；模型只填业务事实和明确提到的对象。',
+    '实体的 id 参数可以直接填写用户说出的自然对象（例如“2615房”“矿泉水”“充电器”“本次住店”），不要向用户索要 ID，也不要自行拼酒店前缀；Gateway 会用原子空间索引和动态查询把它解析成规范 ID。无法唯一解析时才确认。',
+    '记录写入或查询必须使用工具真实结果；没有成功不能说已经记下，查不到不能编造。',
+    '任务派发、独立通知和记录成功后的确认由 Gateway 生成固定短句，必须复述实际执行对象和内容；模型不要另造或缩写成“已记录”“已通知”。创建任务工具内部完成通知，最多等待通知 5 秒后一次性返回合并结果；不要再调用独立通知工具。',
+    '工具参数或系统规则问题不得向员工解释。已知信息足够时直接修正参数重试；只有确实缺少会改变业务事实的信息时，才用一句自然的话问那个信息。追问必须依据当前上下文动态生成：先承接本轮新增线索，再问剩余的一个关键点；不得复读固定问句。不说字段、类型、编码、ID、接口或校验规则。',
+    '用户说“改一下、记错了、删掉、重记”时使用 atomic_record_correct；不要用 atomic_record_write 再新增一条来冒充修改。紧接上一条记录的“你记错了，是明天”“不是1015，是801”直接修改最近记录，不要再次确认；工具会优先定位最近记录，不要向用户索要记录 ID。只有确实存在多个同轮候选才追问。',
+    '</hotel_atomic_records>',
+  ].join('\n')
+}
+
+function buildPendingRecordClarificationInstructions(pending = null) {
+  if (!pending || typeof pending !== 'object') return ''
+  const facts = pending.facts && typeof pending.facts === 'object'
+    ? Object.entries(pending.facts)
+      .slice(0, 12)
+      .map(([key, value]) => `${key}=${String(value).slice(0, 120)}`)
+      .join('，')
+    : ''
+  const entities = Array.isArray(pending.entities)
+    ? pending.entities.slice(0, 10)
+      .map(entity => [entity.type, entity.id, entity.role].filter(Boolean).join(':'))
+      .join('，')
+    : ''
+  return [
+    '<pending_record_clarification>',
+    '上一条业务事实尚未写入，正在通过自然对话补充信息。只有用户明显转到新话题时才放弃它。',
+    pending.content ? `已知事实：${pending.content}` : '',
+    pending.action ? `已知动作：${pending.action}` : '',
+    facts ? `已知维度：${facts}` : '',
+    entities ? `已知对象线索：${entities}` : '',
+    pending.guidance ? `仍需补充：${pending.guidance}` : '',
+    Array.isArray(pending.entityHints) && pending.entityHints.length
+      ? `可用于定位的自然线索包括：${pending.entityHints.join('、')}`
+      : '',
+    '用户的后续短句是对这件事的补充。结合近期对话累计理解，不要要求用户把已经说过的话重新完整复述。',
+    '先判断本轮新增线索与前文合并后是否已经足够定位。房号、具体订单号，或者“渠道/订单 + 入住日期 + 客人姓名”都可以形成可用定位；例如前文是“携程订单”，本轮是“明天入住的李先生”，应合并为“明天入住的李先生携程订单”，立即重新调用 atomic_record_write 写入原事实，不再追问房号。',
+    '只有合并后仍然只是泛称时才继续追问；一旦已有可用定位，必须优先重试写入，不能为了获得更完整资料继续盘问用户。重试时保留原来的事实内容、动作和已知维度，并把累计得到的对象线索一并提交。',
+    '追问由你根据上下文自己组织，只问一个最合适的问题；先自然承接刚获得的线索，不得重复上一轮原句，也不得向用户朗读内部字段。',
+    '</pending_record_clarification>',
+  ].filter(Boolean).join('\n')
+}
 
 const delegateTool = {
   type: 'function',
@@ -262,7 +325,7 @@ const spiritTaskCreateTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_CREATE_TOOL_NAME,
-    description: '直接创建并派发 Spirit 业务任务。根据姓名或房号选择执行人：16至24楼及22、25、26、28楼按员工卡片映射，没有专属负责人的楼层由黄维维兜底；说“我自己”时使用当前身份。普通任务创建成功后系统立即向执行人发送工作通知，不等待系统状态通知；不要在创建后再次调用 spirit_voice_notify。只有用户明确要求“自测且不通知任何人”时才可设置 selfTest=true，此时关闭通知。不得调用后台 Agent 或自行拼 API。',
+    description: '直接创建并派发尚待执行的 Spirit 业务任务；“请送、需要借、去检查、安排维修”属于任务。“已经借出、已经送到、刚捡到、实际用了”等已发生事实改用 atomic_record_write。根据姓名或房号选择执行人：16至24楼及22、25、26、28楼按员工卡片映射，没有专属负责人的楼层由黄维维兜底；说“我自己”时使用当前身份。创建工具内部同时发送工作通知，模型只调用这一个工具，不再调用 spirit_voice_notify。Gateway 最多等待通知 5 秒并一次性复述执行人、任务内容和通知结果；超时只说通知结果暂未确认，不再追加第二条回执。创建任务这一轮不要调用 atomic_record_write；后续由慢模型检查任务结果是否产生事件。只有用户明确要求“自测且不通知任何人”时才可设置 selfTest=true，此时关闭通知。不得调用后台 Agent 或自行拼 API。',
     parameters: {
       type: 'object',
       properties: {
@@ -286,7 +349,7 @@ const spiritTaskUpdateTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_UPDATE_TOOL_NAME,
-    description: '直接修改 Spirit 任务的状态、描述、执行人或要求时间。用户不需要提供 taskId；按房号、标题或“刚才那个任务”指代时先自动定位，多个候选才确认。要求完成时间写入 completeTime，不得写入 description；系统会按修改内容选择正确的业务接口。重新分配成功后系统会立即向新执行人发送工作通知，不等待旧系统通知；不要再调用 spirit_voice_notify。',
+    description: '直接修改 Spirit 任务的状态、描述、执行人或要求时间。用户不需要提供 taskId；按房号、标题或“刚才那个任务”指代时先自动定位，多个候选才确认。要求完成时间写入 completeTime，不得写入 description；系统会按修改内容选择正确的业务接口。任务修改这一轮不要调用 atomic_record_write。重新分配成功后系统会立即向新执行人发送工作通知，不等待旧系统通知；不要再调用 spirit_voice_notify。',
     parameters: {
       type: 'object',
       properties: {
@@ -310,7 +373,7 @@ const spiritTaskStartTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_START_TOOL_NAME,
-    description: '启动一个 Spirit 业务任务。用户明确表示开始、接手或着手执行任务时调用；用户不需要提供 taskId，按自然指代自动定位，多个候选才确认。启动成功后，当前 Gateway 会立即向执行人发送状态通知，不等待旧系统通知，也不要再次调用 spirit_voice_notify。',
+    description: '启动一个 Spirit 业务任务。用户明确表示开始、接手或着手执行任务时调用；用户不需要提供 taskId，按自然指代自动定位，多个候选才确认。启动任务这一轮不要调用 atomic_record_write。启动成功后，当前 Gateway 会立即向执行人发送状态通知，不等待旧系统通知，也不要再次调用 spirit_voice_notify。',
     parameters: {
       type: 'object',
       properties: {
@@ -327,7 +390,7 @@ const spiritTaskCompleteTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_COMPLETE_TOOL_NAME,
-    description: '完成一个 Spirit 业务任务，可附带完成备注。只有用户明确表达任务已经完成时调用；用户不需要提供 taskId，按自然指代自动定位，多个候选才确认。现场发现但尚未完成时应使用 spirit_task_add_comment。完成成功后，当前 Gateway 会立即向执行人发送状态通知，不等待旧系统通知，也不要再次调用 spirit_voice_notify。',
+    description: '完成一个 Spirit 业务任务，可附带完成备注。只有用户明确表达任务已经完成时调用；用户不需要提供 taskId，按自然指代自动定位，多个候选才确认。现场发现但尚未完成时应使用 spirit_task_add_comment。完成任务这一轮不要调用 atomic_record_write，事件由后续慢模型检查任务结果后写入。完成成功后，当前 Gateway 会立即向执行人发送状态通知，不等待旧系统通知，也不要再次调用 spirit_voice_notify。',
     parameters: {
       type: 'object',
       properties: {
@@ -345,7 +408,7 @@ const spiritTaskUpdateStatusTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_UPDATE_STATUS_TOOL_NAME,
-    description: '通过 Spirit 专用状态接口修改任务状态。用于异常、待审批等明确状态流转；用户不需要提供 taskId，按自然指代自动定位，多个候选才确认。开始任务优先使用 spirit_task_start，完成任务优先使用 spirit_task_complete。状态修改成功后，当前 Gateway 会立即向执行人发送状态通知，不等待旧系统通知，也不要再次调用 spirit_voice_notify。',
+    description: '通过 Spirit 专用状态接口修改任务状态。用于异常、待审批等明确状态流转；用户不需要提供 taskId，按自然指代自动定位，多个候选才确认。开始任务优先使用 spirit_task_start，完成任务优先使用 spirit_task_complete。状态修改这一轮不要调用 atomic_record_write。状态修改成功后，当前 Gateway 会立即向执行人发送状态通知，不等待旧系统通知，也不要再次调用 spirit_voice_notify。',
     parameters: {
       type: 'object',
       properties: {
@@ -367,7 +430,7 @@ const spiritTaskAddCommentTool = {
   type: 'function',
   function: {
     name: SPIRIT_TASK_ADD_COMMENT_TOOL_NAME,
-    description: '向任务追加执行记录或评论，不覆盖原任务标题和描述。用户汇报查房结果、现场异常、处理进展或补充信息时调用。代用户记录原话时使用 USER_DIALOGUE。',
+    description: '向任务追加执行记录或评论，不覆盖原任务标题和描述。用户汇报查房结果、现场异常、处理进展或补充信息时调用。代用户记录原话时使用 USER_DIALOGUE；本轮不要再调用 atomic_record_write，后续慢模型读取这条执行记录判断是否产生事件。',
     parameters: {
       type: 'object',
       properties: {
@@ -408,7 +471,7 @@ const spiritVoiceNotifyTool = {
   type: 'function',
   function: {
     name: SPIRIT_VOICE_NOTIFY_TOOL_NAME,
-    description: '独立员工通讯工具：只在用户明确要求“通知、告诉、发消息”且不需要创建任务时调用。任务创建工具已经负责创建后的即时通知，不要在创建任务后再次调用本工具。根据姓名或房号选择接收人，并严格以工具真实返回判断是否发送成功。',
+    description: '独立员工通讯工具：只在用户明确要求“通知、告诉、发消息”且不需要创建任务时调用。任务创建工具已经负责创建后的即时通知，不要在创建任务后再次调用本工具。根据姓名或房号选择接收人，并严格以工具真实返回判断是否发送成功；Gateway 最多等待通知 5 秒，超时只回报“结果暂未确认”；成功或超时回执都必须包含接收人和实际通知内容。',
     parameters: {
       type: 'object',
       properties: {
@@ -419,6 +482,169 @@ const spiritVoiceNotifyTool = {
         floor: { type: 'integer', description: '用于匹配接收人的楼层。' },
       },
       required: ['text'],
+      additionalProperties: false,
+    },
+  },
+}
+
+const atomicRecordWriteTool = {
+  type: 'function',
+  function: {
+    name: ATOMIC_RECORD_WRITE_TOOL_NAME,
+    description: '写入一条已经发生、已经观察到，或已经确认成立但将在未来生效的事实。只选“物品、客人、酒店、其他”四类，不再选后端细分类型。物品包括送出、消耗、借还、售卖、库存结果、拾获和交存；客人包括投诉、要求、报失、偏好和住店事实；酒店包括设施、场所、交通天气和交接。只有没有预设标准的事实才用“其他”，不能用它绕过已知动作要求。借出、借用、外借、借给必须填写物品和数量，并关联房间、住店记录、明确客人或员工中的至少一个。投诉以及客人要求、报失、偏好、住店变化、服务结果、寄存和预留必须关联房间、住店记录、具体订单或可识别客人；“携程订单、平台订单、这个客人”等泛称不算可追踪对象。投诉人用 role=complainant，被投诉对象用 role=complaint_target；被投诉的房间或设施不能冒充投诉人。信息不足时结合上下文动态追问一个关键点，不得复读固定模板。常见物品单位可由 Gateway 补齐。送水、补水、给房间放水、添水都归物品；客人报失归客人，员工拾获归物品。content 必须把用户的简略说法改写成准确、完整、可独立理解的事实。它与任务工具互斥；盘点本身是任务，只记盘点后已核实的数量、消耗或差异。',
+    parameters: {
+      type: 'object',
+      properties: {
+        category: { type: 'string', enum: [...RECORD_CATEGORIES], description: '记录类别。不确定时选“其他”，不要为分类追问用户。' },
+        factState: {
+          type: 'string',
+          enum: ['occurred', 'confirmed_arrangement'],
+          description: '事实时间性质。occurred=已经发生、观察到或核实；confirmed_arrangement=安排本身已经确认，只是生效时间在未来。仍待执行的“请送、记得留、去检查”不能调用本工具，应创建任务。',
+        },
+        action: { type: 'string', description: '必填，用简短中文写事实动作，例如借出、归还、送出、拾获、投诉、要求、报失、异常报告。已知标准动作必须如实填写，不能省略动作后改用“其他”绕过最低要求；确实没有预设动作的其他事实可写“记录”或准确的自然动作。' },
+        content: { type: 'string', description: '必填，可独立理解的完整事实。不写“本次”“那个”等脱离对话就失去指代的话。' },
+        facts: {
+          type: 'object',
+          description: '结构化事实。只填用户已明说或可直接确定的维度；无预设标准的“其他”记录可以少填，但借出等已知动作必须满足索引声明的最低要件。',
+          properties: {
+            itemName: { type: 'string', description: '物品名称，Gateway 会尝试映射物品实体；未建档也照常记录。' },
+            objectName: { type: 'string', description: '非库存物品或其他事实对象的名称。' },
+            quantity: { type: 'number', description: '已知数量。' },
+            unit: { type: 'string', description: '数量单位，例如瓶、个、卷。' },
+            location: { type: 'string', description: '发生、发现或适用地点。可以是房号、楼层、电梯门口、走廊等。' },
+            sourceLocation: { type: 'string', description: '物品来源地点。' },
+            targetLocation: { type: 'string', description: '物品去向地点。' },
+            statement: { type: 'string', description: '客人或报告人的明确表述。' },
+            request: { type: 'string', description: '已明确的住客要求。' },
+            preference: { type: 'string', description: '可稳定使用的住店偏好或限制。' },
+            observation: { type: 'string', description: '客观观察到的情况。' },
+            result: { type: 'string', description: '已核实的结果。' },
+            reason: { type: 'string', description: '已知原因；原因不明时不猜。' },
+            amount: { type: 'number', description: '已知金额。' },
+            currency: { type: 'string', description: '币种，例如人民币。' },
+            condition: { type: 'string', description: '物品或设施当时状况。' },
+            scope: { type: 'string', description: '事实适用范围。' },
+            validFrom: { type: 'string', description: '已知生效时间。' },
+            validUntil: { type: 'string', description: '已知失效时间。' },
+          },
+          additionalProperties: true,
+        },
+        entities: {
+          type: 'array',
+          minItems: 0,
+          maxItems: 32,
+          description: '可选的明确对象。只填对话中确定提到的房间、住店记录、物品、地点、员工等；Gateway 解析失败也会先保存记录。',
+          items: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', enum: [...OBJECT_TYPES] },
+              id: { type: 'string', description: '用户说出的对象名称、房号、楼层或地点，例如“2615房”“矿泉水”“本次住店”“18楼电梯门口”；Gateway 负责解析或生成稳定待解析 ID，模型不要猜造。' },
+              role: { type: 'string', description: '对象在事件中的角色。投诉人对应的房间、住店、订单或客人统一填 complainant；被投诉对象填 complaint_target；其他例如 room、stay、item、source_task、source_location、target_location。' },
+            },
+            required: ['type', 'id'],
+            additionalProperties: false,
+          },
+        },
+        occurredAt: { type: 'string', description: '可选，事实发生或发现时间；使用 ISO 8601。' },
+        details: { type: 'string', description: '可选审计说明。' },
+        status: { type: 'string', description: '可选记录状态；不确定时省略。借出、销售等事实不靠覆盖状态来代替后续事件。' },
+      },
+      required: ['category', 'factState', 'action', 'content'],
+      additionalProperties: false,
+    },
+  },
+}
+
+const atomicRecordQueryTool = {
+  type: 'function',
+  function: {
+    name: ATOMIC_RECORD_QUERY_TOOL_NAME,
+    description: '查询当前登录用户可见的业务事件。用户问房间历史、住店事项、借用物品、待结算、交接、维修或“刚才记的那条”时调用；不要假装记得，也不要向用户索要 ownerId。objectId 可以填房号、物品名称或“本次住店”，Gateway 会解析；结果为空或多个候选时如实说明。',
+    parameters: {
+      type: 'object',
+      properties: {
+        objectType: { type: 'string', enum: [...OBJECT_TYPES], description: '可选，任一实体类型；查询会检查实体映射，不要求主对象。' },
+        objectId: { type: 'string', description: '可选，对象名称、房号或规范 ID；例如 2615、矿泉水、本次住店。' },
+        category: { type: 'string', enum: [...RECORD_CATEGORIES], description: '可选，按物品、客人、酒店或其他筛选。' },
+        status: { type: 'string', description: '可选，记录状态，例如 pending_return、open。' },
+        keyword: { type: 'string', description: '可选，在摘要、详情、关联对象和补充属性中搜索。' },
+        from: { type: 'string', description: '可选，发生时间起点，ISO 8601。' },
+        to: { type: 'string', description: '可选，发生时间终点，ISO 8601。' },
+        limit: { type: 'integer', description: '可选，最多返回 20 条，默认 10。' },
+      },
+      additionalProperties: false,
+    },
+  },
+}
+
+const atomicRecordCorrectTool = {
+  type: 'function',
+  function: {
+    name: ATOMIC_RECORD_CORRECT_TOOL_NAME,
+    description: '更正已经保存的业务事件。用户明确说“改成、记错了、删掉、重记一条”时调用；不要用 atomic_record_write 新增一条来代替修改。紧接上一条记录的“你记错了，是明天”“不是1015，是801”直接调用一次，不要让用户重复确认。reference 可省略或写“刚才那条”，Gateway 优先定位最近记录；只有确实存在多个同轮候选时才追问。action=update 只修改指定字段，action=delete 将该记录从正常查询中移除，action=rewrite 用新的完整事件替换原记录。成功后会返回实际更正结果；工具未成功前不得声称已修改。',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['update', 'delete', 'rewrite'],
+          description: 'update=修改字段；delete=删除；rewrite=用新的完整事件重记。',
+        },
+        recordId: {
+          type: 'string',
+          description: '可选，只能使用系统之前返回的真实记录 ID；通常省略。',
+        },
+        reference: {
+          type: 'string',
+          description: '用户对原记录的自然描述，例如“1015房刚才的空调投诉”“刚记的充电宝借出”。不要向用户索要 ID。',
+        },
+        changes: {
+          type: 'object',
+          description: 'action=update 时只填需要改的内容。content 要同步改成更正后可独立理解的完整事实；明确对象变更放 entities，结构化维度变更放 facts。',
+          properties: {
+            category: { type: 'string', enum: [...RECORD_CATEGORIES] },
+            action: { type: 'string' },
+            content: { type: 'string' },
+            facts: { type: 'object', additionalProperties: true },
+            entities: {
+              type: 'array',
+              maxItems: 32,
+              items: {
+                type: 'object',
+                properties: {
+                  type: { type: 'string', enum: [...OBJECT_TYPES] },
+                  id: { type: 'string' },
+                  role: { type: 'string' },
+                },
+                required: ['type', 'id'],
+                additionalProperties: false,
+              },
+            },
+            status: { type: 'string' },
+            occurredAt: { type: 'string', description: '可选，事实发生时间；使用 ISO 8601。' },
+            details: { type: 'string' },
+          },
+          additionalProperties: false,
+        },
+        replacement: {
+          type: 'object',
+          description: 'action=rewrite 时填写新的完整记录，至少包含 category 和 content。',
+          properties: {
+            category: { type: 'string', enum: [...RECORD_CATEGORIES] },
+            action: { type: 'string' },
+            content: { type: 'string' },
+            facts: { type: 'object', additionalProperties: true },
+            entities: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            status: { type: 'string' },
+            occurredAt: { type: 'string' },
+            details: { type: 'string' },
+          },
+          required: ['category', 'content'],
+          additionalProperties: false,
+        },
+        reason: { type: 'string', description: '可选，更正原因。' },
+      },
+      required: ['action'],
       additionalProperties: false,
     },
   },
@@ -477,6 +703,9 @@ export const TOOLS = [
   spiritTaskAddCommentTool,
   spiritTaskDeleteTool,
   spiritVoiceNotifyTool,
+  atomicRecordWriteTool,
+  atomicRecordQueryTool,
+  atomicRecordCorrectTool,
 ]
 
 export const HOTEL_DIRECT_TOOLS = [
@@ -493,6 +722,9 @@ export const HOTEL_DIRECT_TOOLS = [
   spiritTaskAddCommentTool,
   spiritTaskDeleteTool,
   spiritVoiceNotifyTool,
+  atomicRecordWriteTool,
+  atomicRecordQueryTool,
+  atomicRecordCorrectTool,
 ]
 
 export function frontendTools(agentContext = {}) {
@@ -524,6 +756,13 @@ export function speakResponseInstructions(content) {
   return `请以自然口语传达下面的信息，保持事实一致，不调用工具：\n${content}`
 }
 
+export function verbatimSpeakResponseInstructions(content) {
+  return [
+    '只播报下面这句话的原文，不要改写、增删、解释或补充，不调用工具：',
+    content,
+  ].join('\n')
+}
+
 export const permissionResponseInstructions = [
   '这是后台 Agent 的权限请求。',
   '自然、简短地说明操作，并询问用户是否同意授权。',
@@ -537,8 +776,14 @@ export function buildFrontendInstructions(agentContext = {}) {
   )
   const supplementalContext = [
     String(agentContext.supplementalContext || '').trim(),
-    ...(!hasEnterpriseContext && agentContext.toolProfile === HOTEL_DIRECT_TOOL_PROFILE
-      ? [buildSpiritTaskDispatchContext()]
+    buildPendingRecordClarificationInstructions(agentContext.pendingRecordContext),
+    ...(agentContext.toolProfile === HOTEL_DIRECT_TOOL_PROFILE
+      ? [
+          ...(!hasEnterpriseContext ? [buildSpiritTaskDispatchContext()] : []),
+          // This is a runtime safety override. The daily tenant prompt may be
+          // cached or authored before the open-world entity rules existed.
+          buildAtomicRecordInstructions(),
+        ]
       : []),
   ].filter(Boolean).join('\n\n')
   return [

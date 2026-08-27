@@ -34,12 +34,16 @@ export {
   SPIRIT_TASK_ADD_COMMENT_TOOL_NAME,
   SPIRIT_TASK_DELETE_TOOL_NAME,
   SPIRIT_VOICE_NOTIFY_TOOL_NAME,
+  ATOMIC_RECORD_WRITE_TOOL_NAME,
+  ATOMIC_RECORD_QUERY_TOOL_NAME,
+  ATOMIC_RECORD_CORRECT_TOOL_NAME,
   STANDARD_TOOL_PROFILE,
   HOTEL_DIRECT_TOOL_PROFILE,
   TOOLS,
   HOTEL_DIRECT_TOOLS,
   frontendTools,
   buildFrontendInstructions,
+  verbatimSpeakResponseInstructions,
 } from './frontend-tools.mjs'
 
 // Re-export registry symbols for backward compatibility.
@@ -122,6 +126,12 @@ export class RealtimeFrontend {
     this.conversationItemWaiters = new Map()
     this.idleWaiters = []
     this.outputQueue = Promise.resolve()
+    // Function results are a protocol continuation of the provider's active
+    // response, not a new user-facing response. Keep them out of outputQueue:
+    // waiting for the active response to become idle can deadlock when the
+    // provider is itself waiting for this function result before sending
+    // response.done.
+    this.toolOutputQueue = Promise.resolve()
     this.responseQueueGeneration = 0
     this.responseStartTimeoutMs = responseStartTimeoutMs
       ?? this.provider.responseStartTimeoutMs
@@ -166,13 +176,21 @@ export class RealtimeFrontend {
         this.onError?.(error)
         finish(error)
       })
-      ws.on('close', () => {
+      ws.on('close', (_code, reason) => {
         this.ready = false
         this.sessionConfigured = false
         this.recentContextInjected = false
         this.resetResponses()
-        finish(new Error(`${this.provider.label} 连接已关闭`))
-        this.onClose?.()
+        const detail = String(reason || '').trim()
+        const closeError = new Error(
+          `${this.provider.label} 连接已关闭`
+          + (detail ? `：${detail}` : ''),
+        )
+        finish(closeError)
+        // A provider can reject the session by closing the socket instead of
+        // sending an `error` event. Forward the close reason so the Gateway
+        // can classify fatal credential/account failures and stop retrying.
+        this.onClose?.(closeError)
       })
       ws.on('message', raw => {
         let providerEvent
@@ -292,21 +310,31 @@ export class RealtimeFrontend {
   } = {}) {
     const sendOutput = () => this.createConversationItem(
       this.protocol.functionOutputItem(callId, output),
+      { protectedFromCancel: true },
     )
-    if (!createResponse) return this.enqueueAction(sendOutput)
-    return this.enqueueResponse('agent', context, async () => {
-      await sendOutput()
-      this.send(this.protocol.responseCreate(response))
+    // Always commit the function output immediately. A follow-up response,
+    // when requested, may still wait for the provider's response slot to
+    // become idle after it has received the result.
+    const outputDelivery = this.enqueueToolOutput(sendOutput)
+    if (!createResponse) return outputDelivery
+    return outputDelivery.then(delivery => {
+      if (delivery?.skipped || delivery?.failed || delivery?.cancelled) {
+        return delivery
+      }
+      return this.enqueueResponse('agent', context, () => {
+        this.send(this.protocol.responseCreate(response))
+      })
     })
   }
 
-  createConversationItem(item) {
+  createConversationItem(item, { protectedFromCancel = false } = {}) {
     // Id namespaces are dialect-specific (the GA dialect derives them from the
     // item type), so the protocol adapter mints the id.
     const id = item.id || this.protocol.conversationItemId(item)
     return new Promise((resolve, reject) => {
       const waiter = {
         id,
+        protectedFromCancel,
         resolve,
         reject,
         timer: setTimeout(() => {
@@ -322,6 +350,7 @@ export class RealtimeFrontend {
 
   speak(text, origin = 'agent', context = {}, {
     shouldSpeak,
+    verbatim = false,
   } = {}) {
     const content = String(text || '').trim()
     if (!content) return Promise.resolve()
@@ -330,6 +359,7 @@ export class RealtimeFrontend {
       this.send(this.protocol.responseCreate(
         this.provider.buildSpeakResponse(content, {
           textOnly: this.agentContext.textOnly === true,
+          verbatim,
         }),
       ))
     })
@@ -384,7 +414,12 @@ export class RealtimeFrontend {
       this.settlePending(item, { cancelled: true, phase: 'start' })
     })
     this.pendingResponses = []
-    this.rejectConversationItemWaiters(new Error('Realtime 请求已取消'))
+    // A committed function result must survive a user interruption. Only
+    // ordinary conversation items belong to the cancelled turn.
+    this.rejectConversationItemWaiters(
+      new Error('Realtime 请求已取消'),
+      { includeProtected: false },
+    )
     if (hasResponse) this.send(this.protocol.responseCancel())
   }
 
@@ -416,6 +451,16 @@ export class RealtimeFrontend {
     }
     if (cancelledActive) this.send(this.protocol.responseCancel())
     return cancelledActive
+  }
+
+  enqueueToolOutput(action) {
+    const run = async () => {
+      if (!this.ready) return { skipped: true, reason: 'realtime_not_ready' }
+      await action()
+      return { completed: true }
+    }
+    this.toolOutputQueue = this.toolOutputQueue.then(run, run)
+    return this.toolOutputQueue
   }
 
   enqueueAction(action) {
@@ -728,12 +773,14 @@ export class RealtimeFrontend {
     this.resolveIdle()
   }
 
-  rejectConversationItemWaiters(error) {
+  rejectConversationItemWaiters(error, { includeProtected = true } = {}) {
     this.conversationItemWaiters.forEach(waiter => {
+      if (!includeProtected && waiter.protectedFromCancel) return
       clearTimeout(waiter.timer)
+      this.conversationItemWaiters.delete(waiter.id)
       waiter.reject(error)
     })
-    this.conversationItemWaiters.clear()
+    if (includeProtected) this.conversationItemWaiters.clear()
   }
 
   close() {

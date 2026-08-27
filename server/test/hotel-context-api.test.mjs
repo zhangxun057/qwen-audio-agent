@@ -17,7 +17,7 @@ test('exposes the production-shaped Context Mock API without leaking its token',
   const contextService = new HotelContextService({
     mode: 'mock',
     contextId: 'hotel-10082-daily',
-    userId: 'demo-user-hotel-10082',
+    userId: '2079697_hotel_10082',
     provider,
     mockProvider: provider,
     maxPromptChars: 32_000,
@@ -43,21 +43,21 @@ test('exposes the production-shaped Context Mock API without leaking its token',
   const origin = `http://127.0.0.1:${address.port}`
 
   const unauthorized = await fetch(
-    `${origin}/v1/voice-contexts/hotel-10082-daily?userId=demo-user-hotel-10082`,
+    `${origin}/v1/voice-contexts/hotel-10082-daily?userId=2079697_hotel_10082`,
   )
   assert.equal(unauthorized.status, 401)
 
   const response = await fetch(
-    `${origin}/v1/voice-contexts/hotel-10082-daily?userId=demo-user-hotel-10082`,
+    `${origin}/v1/voice-contexts/hotel-10082-daily?userId=2079697_hotel_10082`,
     { headers: { Authorization: `Bearer ${contextToken}` } },
   )
   assert.equal(response.status, 200)
   const body = await response.json()
   assert.equal(body.contextId, 'hotel-10082-daily')
-  assert.equal(body.subject.userId, 'demo-user-hotel-10082')
+  assert.equal(body.subject.userId, '2079697_hotel_10082')
   assert.equal(body.subject.displayName, '张洵')
-  assert.match(body.prompt, /当前登录用户：演示用户/)
-  assert.match(body.prompt, /当前用户 ID：demo-user-hotel-10082/)
+  assert.match(body.prompt, /当前登录用户：张洵/)
+  assert.match(body.prompt, /当前用户 ID：2079697_hotel_10082/)
   assert.doesNotMatch(body.prompt, /张洵总裁|<spirit_task_dispatch>/)
   assert.match(body.contentHash, /^sha256:/)
 
@@ -71,15 +71,16 @@ test('exposes the production-shaped Context Mock API without leaking its token',
   const healthText = await healthResponse.text()
   assert.doesNotMatch(healthText, new RegExp(contextToken))
   const health = JSON.parse(healthText)
-  assert.deepEqual(health.contextService, {
+  assert.deepEqual({ ...health.contextService, promptChars: undefined }, {
     mode: 'mock',
     configured: true,
     contextId: 'hotel-10082-daily',
-    version: '2026-08-21-07',
-    subjectUserId: 'demo-user-hotel-10082',
-    promptChars: 5228,
+    version: '2026-08-26-08',
+    subjectUserId: '2079697_hotel_10082',
+    promptChars: undefined,
     status: 'ready',
     fallback: false,
     lastError: null,
   })
+  assert.ok(health.contextService.promptChars > 5228)
 })

@@ -67,6 +67,8 @@ test('classifies non-recoverable DashScope account errors as fatal', () => {
   for (const message of [
     'InvalidApiKey: Invalid API-key provided.',
     'Arrearage: Access denied, please make sure your account is in good standing.',
+    'Access denied, please make sure your account is in good standing.',
+    'Access to model denied. Please make sure you are eligible for using the model.',
     'AllocationQuota.FreeTierOnly: The free tier of the model has been exhausted.',
     'Free allocated quota exceeded.',
     'Unexpected server response: 401',
@@ -326,6 +328,9 @@ test('configures Qwen Audio Realtime with Smart Turn only', () => {
       'spirit_task_add_comment',
       'spirit_task_delete',
       'spirit_voice_notify',
+      'atomic_record_write',
+      'atomic_record_query',
+      'atomic_record_correct',
     ],
   )
   assert.deepEqual(
@@ -946,6 +951,37 @@ test('can close a stale function call without creating a new model response', as
     item: { id: sent[0].item.id, type: 'function_call_output' },
   })
   await outcome
+})
+
+test('delivers a function result while the source response is still active', async () => {
+  const frontend = createQwenFrontend({
+    responseStartTimeoutMs: 100,
+  })
+  const sent = []
+  frontend.ready = true
+  frontend.send = payload => sent.push(payload)
+  // A provider may keep the function-call response open while waiting for
+  // the function result. The result must not wait for response.done.
+  frontend.activeResponses.add('response-source')
+
+  const outcome = frontend.sendFunctionOutput(
+    'call-immediate',
+    { status: 'ok' },
+    { turnId: 'turn-one' },
+    { createResponse: false },
+  )
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(sent[0].type, 'conversation.item.create')
+  assert.equal(sent[0].item.type, 'function_call_output')
+  frontend.handleLifecycle({
+    type: 'conversation.item.created',
+    item: { ...sent[0].item, id: sent[0].item.id },
+  })
+  assert.deepEqual(await outcome, { completed: true })
+  // The source response is deliberately left active; no response.done is
+  // needed before the function output reaches the provider.
+  assert.equal(frontend.activeResponses.has('response-source'), true)
 })
 
 test('accepts an Omni conversation item receipt with a provider-assigned id', async () => {
@@ -1866,4 +1902,33 @@ test('rejects connect fast when speech-to-speech reports its single session slot
     /session slots are in use/,
   )
   assert.equal(frontend.ready, false)
+})
+
+test('forwards a provider close reason to the Gateway close callback', async t => {
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise(resolve => server.once('listening', resolve))
+  server.once('connection', socket => {
+    socket.send(JSON.stringify({ type: 'session.created' }))
+    socket.close(1007, 'Access denied, please make sure your account is in good standing.')
+  })
+  const address = server.address()
+  let closeError
+  const frontend = new RealtimeFrontend({
+    provider: {
+      ...REALTIME_PROVIDERS.qwen,
+      isConfigured: () => true,
+      url: () => `ws://127.0.0.1:${address.port}/v1/realtime`,
+    },
+    onClose: error => { closeError = error },
+  })
+  t.after(async () => {
+    frontend.close()
+    await new Promise(resolve => server.close(resolve))
+  })
+
+  await assert.rejects(
+    frontend.connect(),
+    /account is in good standing/,
+  )
+  assert.match(closeError.message, /account is in good standing/)
 })
