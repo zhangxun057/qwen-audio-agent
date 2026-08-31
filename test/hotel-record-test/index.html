@@ -62,6 +62,51 @@
     @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } header { display: block; } .badge { display: inline-block; margin-top: 10px; } }
     @media (max-width: 480px) { .row, .row.three { grid-template-columns: 1fr; } .wrap { padding-inline: 12px; } }
   </style>
+  <style>
+    /* Keep the colleague-facing handoff aligned with the existing minimal black-purple voice UI. */
+    :root {
+      color-scheme: dark;
+      --ink: #f5f5f7;
+      --muted: #8d8999;
+      --line: #ffffff18;
+      --panel: #111016e6;
+      --bg: #08090d;
+      --accent: #785cf4;
+      --accent-soft: #21184a;
+      --danger: #f1a2a2;
+    }
+    body {
+      background:
+        radial-gradient(circle at 50% -14%, #39227666 0, transparent 44%),
+        #08090d;
+    }
+    .wrap { width: min(1020px, 100%); padding-top: 28px; }
+    header { border-bottom-color: #ffffff12; }
+    h1 { letter-spacing: .01em; }
+    .sub, .hint, .empty { color: var(--muted); }
+    .badge { border-color: #785cf455; color: #c5baff; background: #21184a99; }
+    .panel { border-color: var(--line); background: var(--panel); box-shadow: 0 16px 42px #0008; }
+    label, th { color: #a9a5b5; }
+    input, textarea, select {
+      border-color: #ffffff1f;
+      color: var(--ink);
+      background: #ffffff08;
+    }
+    input::placeholder, textarea::placeholder { color: #6e6a7b; }
+    input:focus, textarea:focus, select:focus { border-color: #785cf4b3; box-shadow: 0 0 0 3px #785cf426; }
+    button { border-color: #ffffff1f; color: #ded9ea; background: #ffffff08; }
+    button:hover { border-color: #785cf480; background: #785cf414; }
+    button.primary { border-color: #785cf4; color: #fff; background: #785cf4; box-shadow: 0 7px 18px #785cf433; }
+    button.danger { border-color: #c96a6a55; color: #f1b0b0; background: #4b1b241f; }
+    button.ghost { color: #b8aef1; }
+    .presets button { border-color: #785cf433; color: #c6bcff; background: #21184a66; }
+    .status { color: #67d9ad; }
+    .status.error { color: var(--danger); }
+    th, td { border-bottom-color: #ffffff10; }
+    td small { color: var(--muted); }
+    pre { background: #0b0b11; color: #b9b0dd; }
+    details summary { color: #a9a5b5; }
+  </style>
 </head>
 <body>
   <main class="wrap">
